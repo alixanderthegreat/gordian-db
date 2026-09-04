@@ -184,3 +184,108 @@ func BenchmarkConcurrentPebbleWrites(b *testing.B) {
 		}
 	})
 }
+
+// readBenchKeyCount is the pre-populated dataset size shared by BenchmarkConcurrentReads and
+// BenchmarkConcurrentPebbleReads - grounded on pebble's default 4MB MemTableSize (see cycle
+// six's item 0): large enough to force several memtable flushes into L0 sstables and likely at
+// least one compaction, so pebble's read path has real multi-level structure to exercise rather
+// than serving everything from one warm memtable.
+const readBenchKeyCount = 200_000
+
+// BenchmarkConcurrentReads measures concurrent point-read throughput against a bbolt store
+// pre-populated with readBenchKeyCount records (one bulk Update() transaction, NoSync during
+// setup only - population speed isn't being measured and reads have no sync concept at all).
+// The timed loop cycles through every key round-robin via a shared atomic counter, guaranteeing
+// even coverage of the whole dataset rather than relying on random sampling.
+func BenchmarkConcurrentReads(b *testing.B) {
+	dbPath := filepath.Join(b.TempDir(), "gordian-bench-reads.db")
+
+	db, err := bolt.Open(dbPath, 0600, nil)
+	if err != nil {
+		b.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	bucket := []byte("bench")
+	value := make([]byte, 32)
+
+	db.NoSync = true
+	if err := db.Update(func(tx *bolt.Tx) error {
+		bk, err := tx.CreateBucketIfNotExists(bucket)
+		if err != nil {
+			return err
+		}
+		key := make([]byte, 8)
+		for i := uint64(0); i < readBenchKeyCount; i++ {
+			binary.BigEndian.PutUint64(key, i)
+			if err := bk.Put(key, value); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		b.Fatalf("populate: %v", err)
+	}
+	db.NoSync = false
+
+	var counter atomic.Uint64
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		key := make([]byte, 8)
+		for pb.Next() {
+			n := counter.Add(1) % readBenchKeyCount
+			binary.BigEndian.PutUint64(key, n)
+			if err := db.View(func(tx *bolt.Tx) error {
+				if tx.Bucket(bucket).Get(key) == nil {
+					return fmt.Errorf("missing key %d", n)
+				}
+				return nil
+			}); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// BenchmarkConcurrentPebbleReads mirrors BenchmarkConcurrentReads exactly (same
+// readBenchKeyCount, same round-robin key selection, same b.RunParallel + -cpu sweep) against a
+// pebble store instead of bbolt, so the storage engine is the only variable. pebble.NoSync
+// during setup only, same reasoning as the bbolt version.
+func BenchmarkConcurrentPebbleReads(b *testing.B) {
+	dir := filepath.Join(b.TempDir(), "gordian-bench-pebble-reads")
+
+	db, err := pebble.Open(dir, &pebble.Options{})
+	if err != nil {
+		b.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	value := make([]byte, 32)
+	key := make([]byte, 8)
+	for i := uint64(0); i < readBenchKeyCount; i++ {
+		binary.BigEndian.PutUint64(key, i)
+		if err := db.Set(key, value, pebble.NoSync); err != nil {
+			b.Fatalf("populate: %v", err)
+		}
+	}
+
+	var counter atomic.Uint64
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		key := make([]byte, 8)
+		for pb.Next() {
+			n := counter.Add(1) % readBenchKeyCount
+			binary.BigEndian.PutUint64(key, n)
+			v, closer, err := db.Get(key)
+			if err != nil {
+				b.Fatal(err)
+			}
+			_ = v
+			if err := closer.Close(); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
