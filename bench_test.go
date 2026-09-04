@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -288,4 +290,174 @@ func BenchmarkConcurrentPebbleReads(b *testing.B) {
 			}
 		}
 	})
+}
+
+// BenchmarkMixedReadsUnderBoltWrites measures bbolt's read latency while runtime.GOMAXPROCS(0)
+// background writer goroutines continuously commit durable Update()s to a SEPARATE key range
+// (readBenchKeyCount and above) - not the range being read, so this isolates "does write
+// pressure hurt reads" from "does writing to the same hot keys behave differently" (see cycle
+// eight's obstacle 3). Writer count is tied to GOMAXPROCS/-cpu, same principle as every reader/
+// writer count elsewhere in this file, not an arbitrary fixed number (obstacle 2). Compare this
+// function's ns/op directly against BenchmarkConcurrentReads (cycle six's pure-read baseline)
+// to see the actual degradation, if any, caused by concurrent writes.
+func BenchmarkMixedReadsUnderBoltWrites(b *testing.B) {
+	dbPath := filepath.Join(b.TempDir(), "gordian-bench-mixed-bolt.db")
+
+	db, err := bolt.Open(dbPath, 0600, nil)
+	if err != nil {
+		b.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	bucket := []byte("bench")
+	value := make([]byte, 32)
+
+	db.NoSync = true
+	if err := db.Update(func(tx *bolt.Tx) error {
+		bk, err := tx.CreateBucketIfNotExists(bucket)
+		if err != nil {
+			return err
+		}
+		key := make([]byte, 8)
+		for i := uint64(0); i < readBenchKeyCount; i++ {
+			binary.BigEndian.PutUint64(key, i)
+			if err := bk.Put(key, value); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		b.Fatalf("populate: %v", err)
+	}
+	db.NoSync = false
+
+	stop := make(chan struct{})
+	var writerWg sync.WaitGroup
+	var writeCount, writeErrs atomic.Uint64
+	numWriters := runtime.GOMAXPROCS(0)
+	writerWg.Add(numWriters)
+	for i := 0; i < numWriters; i++ {
+		go func() {
+			defer writerWg.Done()
+			key := make([]byte, 8)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				binary.BigEndian.PutUint64(key, readBenchKeyCount+writeCount.Add(1))
+				if err := db.Update(func(tx *bolt.Tx) error {
+					return tx.Bucket(bucket).Put(key, value)
+				}); err != nil {
+					writeErrs.Add(1)
+				}
+			}
+		}()
+	}
+
+	var readCounter atomic.Uint64
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		key := make([]byte, 8)
+		for pb.Next() {
+			n := readCounter.Add(1) % readBenchKeyCount
+			binary.BigEndian.PutUint64(key, n)
+			if err := db.View(func(tx *bolt.Tx) error {
+				if tx.Bucket(bucket).Get(key) == nil {
+					return fmt.Errorf("missing key %d", n)
+				}
+				return nil
+			}); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.StopTimer()
+
+	close(stop)
+	writerWg.Wait()
+	b.Logf("background writes during mixed load: %d completed, %d errors", writeCount.Load(), writeErrs.Load())
+	if errs := writeErrs.Load(); errs > 0 {
+		b.Errorf("%d background write errors during mixed load", errs)
+	}
+}
+
+// BenchmarkMixedReadsUnderPebbleWrites mirrors BenchmarkMixedReadsUnderBoltWrites exactly
+// (readBenchKeyCount, separate writer key range, GOMAXPROCS(0)-driven background writers,
+// pebble.Sync for realistic durable write pressure matching cycle five's methodology) against
+// pebble instead of bbolt. Logs pebble.Metrics().Flush.Count and .Compact.Count after the run
+// to confirm real flush/compaction activity actually happened during the timed window (per
+// item 0) - a benchmark that never triggers either wouldn't actually be testing what this cycle
+// claims to test.
+func BenchmarkMixedReadsUnderPebbleWrites(b *testing.B) {
+	dir := filepath.Join(b.TempDir(), "gordian-bench-mixed-pebble")
+
+	db, err := pebble.Open(dir, &pebble.Options{})
+	if err != nil {
+		b.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	value := make([]byte, 32)
+	key := make([]byte, 8)
+	for i := uint64(0); i < readBenchKeyCount; i++ {
+		binary.BigEndian.PutUint64(key, i)
+		if err := db.Set(key, value, pebble.NoSync); err != nil {
+			b.Fatalf("populate: %v", err)
+		}
+	}
+
+	stop := make(chan struct{})
+	var writerWg sync.WaitGroup
+	var writeCount, writeErrs atomic.Uint64
+	numWriters := runtime.GOMAXPROCS(0)
+	writerWg.Add(numWriters)
+	for i := 0; i < numWriters; i++ {
+		go func() {
+			defer writerWg.Done()
+			key := make([]byte, 8)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				binary.BigEndian.PutUint64(key, readBenchKeyCount+writeCount.Add(1))
+				if err := db.Set(key, value, pebble.Sync); err != nil {
+					writeErrs.Add(1)
+				}
+			}
+		}()
+	}
+
+	var readCounter atomic.Uint64
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		key := make([]byte, 8)
+		for pb.Next() {
+			n := readCounter.Add(1) % readBenchKeyCount
+			binary.BigEndian.PutUint64(key, n)
+			v, closer, err := db.Get(key)
+			if err != nil {
+				b.Fatal(err)
+			}
+			_ = v
+			if err := closer.Close(); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.StopTimer()
+
+	close(stop)
+	writerWg.Wait()
+	m := db.Metrics()
+	b.Logf("background writes during mixed load: %d completed, %d errors; pebble flushes=%d compactions=%d",
+		writeCount.Load(), writeErrs.Load(), m.Flush.Count, m.Compact.Count)
+	if errs := writeErrs.Load(); errs > 0 {
+		b.Errorf("%d background write errors during mixed load", errs)
+	}
 }
