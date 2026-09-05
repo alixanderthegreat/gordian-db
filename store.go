@@ -52,6 +52,11 @@ func (s *Store) Get(key []byte) (value []byte, ok bool, err error) {
 	return value, true, nil
 }
 
+// Delete durably removes key. It is not an error if key does not exist.
+func (s *Store) Delete(key []byte) error {
+	return s.db.Delete(key, pebble.Sync)
+}
+
 // Scan calls fn for every key with the given prefix, in ascending key order, stopping early if
 // fn returns false. The key and value passed to fn are only valid for the duration of that
 // call - fn must copy anything it needs to retain afterward, the same convention this project's

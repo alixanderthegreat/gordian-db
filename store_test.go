@@ -39,6 +39,31 @@ func TestStorePutGet(t *testing.T) {
 	}
 }
 
+func TestStoreDelete(t *testing.T) {
+	s := openTestStore(t)
+
+	key, value := []byte("key"), []byte("value")
+	if err := s.Put(key, value); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := s.Delete(key); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	_, ok, err := s.Get(key)
+	if err != nil {
+		t.Fatalf("get after delete: %v", err)
+	}
+	if ok {
+		t.Fatalf("get after delete: expected key to be gone")
+	}
+
+	// Deleting a key that doesn't exist is not an error.
+	if err := s.Delete([]byte("never-existed")); err != nil {
+		t.Fatalf("delete missing key: %v", err)
+	}
+}
+
 func TestStoreGetMissing(t *testing.T) {
 	s := openTestStore(t)
 
