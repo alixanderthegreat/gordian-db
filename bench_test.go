@@ -461,3 +461,200 @@ func BenchmarkMixedReadsUnderPebbleWrites(b *testing.B) {
 		b.Errorf("%d background write errors during mixed load", errs)
 	}
 }
+
+// largeScaleKeyCount and largeScaleValueSize ground cycle ten's real-scale benchmarks: 2048
+// bytes approximates simple-bot's real book_chunks record (float[384] embedding = 1536 bytes,
+// plus text overhead) rather than every prior benchmark's unrealistic 32-byte placeholder.
+// 1,000,000 keys x 2048 bytes ~= 2GB per database - ~270x more data than readBenchKeyCount's
+// ~7.6MB, a deliberate practical compromise (see cycle ten's item 0), NOT equivalent to
+// simple-bot's real ~71GB scale (still ~34,000x smaller) - large enough to make B+tree depth
+// and LSM level count real factors, small enough to bulk-populate in seconds, confirmed by a
+// throwaway timing check before this benchmark was written: bolt ~11.3s, pebble ~1.1s per
+// population at this scale (bbolt's B+tree insertion cost, even NoSync/single-transaction, is
+// real and ~10x pebble's - not just an fsync-driven gap, a genuinely new finding at this record
+// size, larger values mean fewer records fit per B+tree page, more splits).
+const largeScaleKeyCount = 1_000_000
+const largeScaleValueSize = 2048
+
+// BenchmarkLargeScaleReads mirrors BenchmarkConcurrentReads exactly (round-robin key selection,
+// same -cpu sweep) but against largeScaleKeyCount records of largeScaleValueSize each instead of
+// readBenchKeyCount's small placeholder dataset - checking whether bbolt's read advantage (cycle
+// six) holds once real B+tree depth and page-cache pressure are present, not just at 8MB scale.
+func BenchmarkLargeScaleReads(b *testing.B) {
+	dbPath := filepath.Join(b.TempDir(), "gordian-bench-largescale-reads.db")
+
+	db, err := bolt.Open(dbPath, 0600, nil)
+	if err != nil {
+		b.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	bucket := []byte("bench")
+	value := make([]byte, largeScaleValueSize)
+
+	db.NoSync = true
+	if err := db.Update(func(tx *bolt.Tx) error {
+		bk, err := tx.CreateBucketIfNotExists(bucket)
+		if err != nil {
+			return err
+		}
+		key := make([]byte, 8)
+		for i := uint64(0); i < largeScaleKeyCount; i++ {
+			binary.BigEndian.PutUint64(key, i)
+			if err := bk.Put(key, value); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		b.Fatalf("populate: %v", err)
+	}
+	db.NoSync = false
+
+	var counter atomic.Uint64
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		key := make([]byte, 8)
+		for pb.Next() {
+			n := counter.Add(1) % largeScaleKeyCount
+			binary.BigEndian.PutUint64(key, n)
+			if err := db.View(func(tx *bolt.Tx) error {
+				if tx.Bucket(bucket).Get(key) == nil {
+					return fmt.Errorf("missing key %d", n)
+				}
+				return nil
+			}); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// BenchmarkLargeScalePebbleReads mirrors BenchmarkLargeScaleReads exactly against pebble instead
+// of bbolt, so the storage engine is the only variable - checking whether pebble's read
+// disadvantage (cycle six) widens or narrows once real LSM level count is present at scale.
+func BenchmarkLargeScalePebbleReads(b *testing.B) {
+	dir := filepath.Join(b.TempDir(), "gordian-bench-largescale-pebble-reads")
+
+	db, err := pebble.Open(dir, &pebble.Options{})
+	if err != nil {
+		b.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	value := make([]byte, largeScaleValueSize)
+	key := make([]byte, 8)
+	for i := uint64(0); i < largeScaleKeyCount; i++ {
+		binary.BigEndian.PutUint64(key, i)
+		if err := db.Set(key, value, pebble.NoSync); err != nil {
+			b.Fatalf("populate: %v", err)
+		}
+	}
+
+	var counter atomic.Uint64
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		key := make([]byte, 8)
+		for pb.Next() {
+			n := counter.Add(1) % largeScaleKeyCount
+			binary.BigEndian.PutUint64(key, n)
+			v, closer, err := db.Get(key)
+			if err != nil {
+				b.Fatal(err)
+			}
+			_ = v
+			if err := closer.Close(); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// BenchmarkLargeScaleWrites measures INCREMENTAL concurrent write throughput on top of an
+// already-populated largeScaleKeyCount-record bbolt store (new keys, starting at
+// largeScaleKeyCount, so they don't collide with the pre-populated range) - checking whether
+// pebble's write advantage (cycle five) holds once the underlying store already has real size,
+// not just when writing into a store that starts empty and only reaches ~8MB during the
+// benchmark itself, as every prior write benchmark did.
+func BenchmarkLargeScaleWrites(b *testing.B) {
+	dbPath := filepath.Join(b.TempDir(), "gordian-bench-largescale-writes.db")
+
+	db, err := bolt.Open(dbPath, 0600, nil)
+	if err != nil {
+		b.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	bucket := []byte("bench")
+	value := make([]byte, largeScaleValueSize)
+
+	db.NoSync = true
+	if err := db.Update(func(tx *bolt.Tx) error {
+		bk, err := tx.CreateBucketIfNotExists(bucket)
+		if err != nil {
+			return err
+		}
+		key := make([]byte, 8)
+		for i := uint64(0); i < largeScaleKeyCount; i++ {
+			binary.BigEndian.PutUint64(key, i)
+			if err := bk.Put(key, value); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		b.Fatalf("populate: %v", err)
+	}
+	db.NoSync = false
+
+	var counter atomic.Uint64
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		key := make([]byte, 8)
+		for pb.Next() {
+			binary.BigEndian.PutUint64(key, largeScaleKeyCount+counter.Add(1))
+			if err := db.Update(func(tx *bolt.Tx) error {
+				return tx.Bucket(bucket).Put(key, value)
+			}); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// BenchmarkLargeScalePebbleWrites mirrors BenchmarkLargeScaleWrites exactly against pebble
+// instead of bbolt (pebble.Sync for durable writes, matching cycle five's methodology).
+func BenchmarkLargeScalePebbleWrites(b *testing.B) {
+	dir := filepath.Join(b.TempDir(), "gordian-bench-largescale-pebble-writes")
+
+	db, err := pebble.Open(dir, &pebble.Options{})
+	if err != nil {
+		b.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	value := make([]byte, largeScaleValueSize)
+	key := make([]byte, 8)
+	for i := uint64(0); i < largeScaleKeyCount; i++ {
+		binary.BigEndian.PutUint64(key, i)
+		if err := db.Set(key, value, pebble.NoSync); err != nil {
+			b.Fatalf("populate: %v", err)
+		}
+	}
+
+	var counter atomic.Uint64
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		key := make([]byte, 8)
+		for pb.Next() {
+			binary.BigEndian.PutUint64(key, largeScaleKeyCount+counter.Add(1))
+			if err := db.Set(key, value, pebble.Sync); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
