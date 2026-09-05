@@ -8,6 +8,7 @@ package gordian
 import (
 	"bytes"
 	"errors"
+	"log"
 
 	"github.com/cockroachdb/pebble"
 )
@@ -17,9 +18,23 @@ type Store struct {
 	db *pebble.DB
 }
 
+// quietLogger suppresses pebble's default informational logging (e.g. "WAL file ... replayed N
+// keys" on every Open) - found live migrating kata-journal (kata cycle 13) onto Store: pebble's
+// DefaultLogger writes routine Infof messages straight to stderr on every single invocation,
+// which is fine for a long-lived server but unacceptable noise for a short-lived CLI tool that
+// opens and closes its store on every command. Errorf still surfaces real problems, and Fatalf
+// still terminates the process, matching what pebble internally expects for unrecoverable
+// conditions - only routine informational noise is silenced.
+type quietLogger struct{}
+
+func (quietLogger) Infof(format string, args ...interface{})  {}
+func (quietLogger) Errorf(format string, args ...interface{}) { log.Printf(format, args...) }
+func (quietLogger) Fatalf(format string, args ...interface{}) { log.Fatalf(format, args...) }
+
 // Open opens (or creates) a Store at the given directory.
 func Open(dir string) (*Store, error) {
-	db, err := pebble.Open(dir, &pebble.Options{})
+	opts := &pebble.Options{Logger: quietLogger{}}
+	db, err := pebble.Open(dir, opts)
 	if err != nil {
 		return nil, err
 	}
