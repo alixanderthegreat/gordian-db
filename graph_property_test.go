@@ -29,22 +29,64 @@ func TestFindByPropertyIndex(t *testing.T) {
 	}
 }
 
-// TestAddIndexedNode_NonStringPropertySkipped proves a non-string property named in indexedKeys
-// is silently skipped rather than erroring - AddIndexedNode only ever indexes string values.
-func TestAddIndexedNode_NonStringPropertySkipped(t *testing.T) {
+// TestFindByPropertyIndex_Int64 proves int64-valued properties are indexed and looked up
+// correctly - the real requirement kata cycle 18 found in simple-bot's own Fact.fact_id (an
+// int64), not just string properties like Entity.name.
+func TestFindByPropertyIndex_Int64(t *testing.T) {
 	g := openTestGraph(t)
-	id, err := g.AddIndexedNode("Entity", map[string]any{"count": 42}, "count")
+	var factID int64 = 733
+	id, err := g.AddIndexedNode("Fact", map[string]any{"fact_id": factID, "text": "hi"}, "fact_id")
 	if err != nil {
 		t.Fatalf("AddIndexedNode: %v", err)
 	}
-	got, err := g.FindByPropertyIndex("Entity", "count", "42")
+
+	got, err := g.FindByPropertyIndex("Fact", "fact_id", factID)
 	if err != nil {
 		t.Fatalf("FindByPropertyIndex: %v", err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("FindByPropertyIndex(count,42) = %+v, want empty - non-string props are never indexed", got)
+	if len(got) != 1 || got[0].ID != id {
+		t.Fatalf("FindByPropertyIndex(Fact,fact_id,733) = %+v, want exactly [id=%d]", got, id)
 	}
-	if n, ok, err := g.GetNode(id); err != nil || !ok || n.Props["count"] != float64(42) {
+
+	none, err := g.FindByPropertyIndex("Fact", "fact_id", int64(999))
+	if err != nil {
+		t.Fatalf("FindByPropertyIndex: %v", err)
+	}
+	if len(none) != 0 {
+		t.Fatalf("FindByPropertyIndex(Fact,fact_id,999) = %+v, want empty", none)
+	}
+}
+
+// TestFindByPropertyIndex_IntKindsInterchangeable proves int, int32, and int64 canonicalize to
+// the same index entry - a caller shouldn't have to track which concrete Go integer type was
+// used to add a node versus look it up.
+func TestFindByPropertyIndex_IntKindsInterchangeable(t *testing.T) {
+	g := openTestGraph(t)
+	id, err := g.AddIndexedNode("Fact", map[string]any{"fact_id": int(42)}, "fact_id")
+	if err != nil {
+		t.Fatalf("AddIndexedNode: %v", err)
+	}
+	got, err := g.FindByPropertyIndex("Fact", "fact_id", int64(42))
+	if err != nil {
+		t.Fatalf("FindByPropertyIndex: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != id {
+		t.Fatalf("FindByPropertyIndex(fact_id, int64(42)) = %+v, want exactly [id=%d] (added as int(42))", got, id)
+	}
+}
+
+// TestAddIndexedNode_UnsupportedTypeSkipped proves a property value of an unsupported type
+// (e.g. bool) is silently skipped rather than erroring - the node itself is unaffected.
+func TestAddIndexedNode_UnsupportedTypeSkipped(t *testing.T) {
+	g := openTestGraph(t)
+	id, err := g.AddIndexedNode("Entity", map[string]any{"verified": true}, "verified")
+	if err != nil {
+		t.Fatalf("AddIndexedNode: %v", err)
+	}
+	if _, err := g.FindByPropertyIndex("Entity", "verified", true); err == nil {
+		t.Fatal("FindByPropertyIndex(verified, true): expected an error for an unsupported value type")
+	}
+	if n, ok, err := g.GetNode(id); err != nil || !ok || n.Props["verified"] != true {
 		t.Fatalf("GetNode(id) = %+v,%v,%v, want the node itself unaffected", n, ok, err)
 	}
 }
