@@ -150,8 +150,110 @@ func (g *Graph) GetNode(id int64) (Node, bool, error) {
 	return n, true, nil
 }
 
-// ErrNodeNotFound is returned by AddEdge when either endpoint doesn't exist.
+// ErrNodeNotFound is returned by AddEdge when either endpoint doesn't exist, and by UpdateNode
+// when id doesn't exist.
 var ErrNodeNotFound = errors.New("gordian: node not found")
+
+// UpdateNode replaces an existing node's properties in place, keeping its id and label unchanged
+// - kata cycle 21's own item 0, the plain-overwrite half of the relational-rows primitive
+// (AddNode/AddIndexedNode only ever insert; nothing could change an existing node's props before
+// this). Returns ErrNodeNotFound if id doesn't exist.
+//
+// Deliberately does NOT touch any secondary-index entries (see AddIndexedNode/
+// FindByPropertyIndex) - it has no record of which of props' keys, if any, were originally passed
+// as indexedKeys, so it cannot know which index entries would need to move. Callers must only
+// use UpdateNode on properties that are never indexed, or accept that any existing index entry
+// for this node becomes stale (pointing at a node whose live prop value no longer matches the
+// indexed value). This is a real, deliberate scope boundary for this cycle, not an oversight -
+// see cycle 21's own obstacle about over-indexing: some real properties (e.g. journal.go's own
+// Note.status) are intended to change over time and are better handled by scanning a small,
+// already-narrowed result set in application code than by an index that update would need to
+// keep in sync.
+func (g *Graph) UpdateNode(id int64, props map[string]any) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	n, ok, err := g.getNodeLocked(id)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: id=%d", ErrNodeNotFound, id)
+	}
+	n.Props = props
+	return g.putNodeLocked(n)
+}
+
+// UpdateNodeIf atomically updates node id's properties only if predicate returns true for its
+// CURRENT properties, the whole check-transform-write happening under g.mu so no concurrent
+// AddNode/AddEdge/UpdateNode/UpdateNodeIf call can interleave - kata cycle 21's item 1, grounded
+// directly in simple-bot's real DeleteNote requirement ("only flip a note's status if it's still
+// open, report honestly if nothing matched" - a compare-and-swap shape, not a blind overwrite). A
+// caller composing plain GetNode + UpdateNode itself would have exactly this gap: another
+// goroutine's update could land between the two calls (GetNode takes no lock at all), silently
+// losing an update or acting on a stale check - UpdateNodeIf closes that race by construction,
+// not by caller discipline (the same reasoning that favored a structural fix over a procedural
+// one in the property-index benchmark, see project_gordian-db-property-lookup-benchmark).
+//
+// transform receives the node's CURRENT properties (not a value the caller captured earlier
+// outside the lock) and returns what they should become - deliberately a function, not a static
+// map, fixing a real staleness gap an earlier version of this function had: a caller wanting to
+// change only ONE field (e.g. status) while preserving the rest (label, text) would otherwise
+// have to read those other fields before calling UpdateNodeIf, and a second writer's change to
+// one of THOSE fields in between would get silently reverted by this call's own stale copy - even
+// though the predicate check itself was correctly atomic. transform running inside the lock, over
+// truly-current props, closes that gap the same way the predicate already did. A transform that
+// doesn't need current values (a full, fixed replacement) can just ignore its argument.
+//
+// applied is false, with a nil error, if id doesn't exist or predicate returned false - a real
+// node lookup/predicate miss is not itself an error condition, matching DeleteNote's own real
+// "ok=false, not an error" contract.
+func (g *Graph) UpdateNodeIf(id int64, predicate func(props map[string]any) bool, transform func(props map[string]any) map[string]any) (applied bool, err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	n, ok, err := g.getNodeLocked(id)
+	if err != nil {
+		return false, err
+	}
+	if !ok || !predicate(n.Props) {
+		return false, nil
+	}
+	n.Props = transform(n.Props)
+	if err := g.putNodeLocked(n); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// getNodeLocked and putNodeLocked factor out UpdateNode/UpdateNodeIf's shared read-decode and
+// encode-write steps. Callers must already hold g.mu - these do not lock themselves, unlike the
+// public GetNode (a pure read with no compound-operation atomicity to protect).
+func (g *Graph) getNodeLocked(id int64) (Node, bool, error) {
+	v, ok, err := g.store.Get(nodeKey(id))
+	if err != nil {
+		return Node{}, false, fmt.Errorf("read node %d: %w", id, err)
+	}
+	if !ok {
+		return Node{}, false, nil
+	}
+	var n Node
+	if err := json.Unmarshal(v, &n); err != nil {
+		return Node{}, false, fmt.Errorf("decode node %d: %w", id, err)
+	}
+	return n, true, nil
+}
+
+func (g *Graph) putNodeLocked(n Node) error {
+	data, err := json.Marshal(n)
+	if err != nil {
+		return fmt.Errorf("encode node %d: %w", n.ID, err)
+	}
+	if err := g.store.Put(nodeKey(n.ID), data); err != nil {
+		return fmt.Errorf("put node %d: %w", n.ID, err)
+	}
+	return nil
+}
 
 // AddEdge creates a directed edge from -> to, labeled. Both endpoints must already exist.
 // Writes both the forward (Neighbors) and reverse (InNeighbors) index entries - Store's Scan is

@@ -2,6 +2,7 @@ package gordian
 
 import (
 	"errors"
+	"sync"
 	"testing"
 )
 
@@ -55,6 +56,157 @@ func TestGraphAddNodeIDsAreSequential(t *testing.T) {
 		if ids[i] != ids[i-1]+1 {
 			t.Fatalf("node ids not sequential: %v", ids)
 		}
+	}
+}
+
+// TestGraphUpdateNode proves the real contract UpdateNode needs to satisfy: props change in
+// place, id and label do not - grounded in kata cycle 21's item 0 (a plain overwrite, mirroring
+// AddNode's own encode-and-Put, just against an existing key).
+func TestGraphUpdateNode(t *testing.T) {
+	g := openTestGraph(t)
+
+	id, err := g.AddNode("Note", map[string]any{"status": "open", "label": "buy milk"})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+
+	if err := g.UpdateNode(id, map[string]any{"status": "done", "label": "buy milk"}); err != nil {
+		t.Fatalf("UpdateNode: %v", err)
+	}
+
+	n, ok, err := g.GetNode(id)
+	if err != nil {
+		t.Fatalf("GetNode: %v", err)
+	}
+	if !ok {
+		t.Fatal("GetNode: not found after UpdateNode")
+	}
+	if n.ID != id {
+		t.Fatalf("GetNode.ID = %d, want %d (UpdateNode must not change id)", n.ID, id)
+	}
+	if n.Label != "Note" {
+		t.Fatalf("GetNode.Label = %q, want %q (UpdateNode must not change label)", n.Label, "Note")
+	}
+	if n.Props["status"] != "done" {
+		t.Fatalf("GetNode.Props[status] = %v, want %q", n.Props["status"], "done")
+	}
+}
+
+// TestGraphUpdateNodeMissing proves UpdateNode reports ErrNodeNotFound rather than silently
+// creating a node at an id that was never allocated by AddNode/AddIndexedNode.
+func TestGraphUpdateNodeMissing(t *testing.T) {
+	g := openTestGraph(t)
+	if err := g.UpdateNode(999, map[string]any{"x": 1}); !errors.Is(err, ErrNodeNotFound) {
+		t.Fatalf("UpdateNode(999, ...): got %v, want ErrNodeNotFound", err)
+	}
+}
+
+// TestGraphUpdateNodeIf_AppliesWhenPredicateTrue and its sibling below prove the exact real shape
+// DeleteNote needs (kata cycle 21 item 1): applied only when the predicate matches the node's
+// CURRENT state, honest applied=false (no error) otherwise - not a blind overwrite.
+func TestGraphUpdateNodeIf_AppliesWhenPredicateTrue(t *testing.T) {
+	g := openTestGraph(t)
+	id, err := g.AddNode("Note", map[string]any{"status": "open"})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+
+	isOpen := func(props map[string]any) bool { return props["status"] == "open" }
+	applied, err := g.UpdateNodeIf(id, isOpen, func(map[string]any) map[string]any {
+		return map[string]any{"status": "done"}
+	})
+	if err != nil {
+		t.Fatalf("UpdateNodeIf: %v", err)
+	}
+	if !applied {
+		t.Fatal("UpdateNodeIf: applied = false, want true (status was open)")
+	}
+
+	n, _, err := g.GetNode(id)
+	if err != nil {
+		t.Fatalf("GetNode: %v", err)
+	}
+	if n.Props["status"] != "done" {
+		t.Fatalf("GetNode.Props[status] = %v, want %q", n.Props["status"], "done")
+	}
+}
+
+// TestGraphUpdateNodeIf_SkipsWhenPredicateFalse mirrors DeleteNote called a second time on an
+// already-resolved note: it must NOT re-apply, and must report applied=false honestly rather than
+// pretending to have done something.
+func TestGraphUpdateNodeIf_SkipsWhenPredicateFalse(t *testing.T) {
+	g := openTestGraph(t)
+	id, err := g.AddNode("Note", map[string]any{"status": "done"})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+
+	isOpen := func(props map[string]any) bool { return props["status"] == "open" }
+	applied, err := g.UpdateNodeIf(id, isOpen, func(map[string]any) map[string]any {
+		return map[string]any{"status": "done"}
+	})
+	if err != nil {
+		t.Fatalf("UpdateNodeIf: %v", err)
+	}
+	if applied {
+		t.Fatal("UpdateNodeIf: applied = true, want false (status was already done, not open)")
+	}
+}
+
+// TestGraphUpdateNodeIf_MissingNode proves a nonexistent id is applied=false with a nil error,
+// not ErrNodeNotFound - matching DeleteNote's own real "ok=false" contract for a made-up id
+// (see UpdateNodeIf's own doc comment).
+func TestGraphUpdateNodeIf_MissingNode(t *testing.T) {
+	g := openTestGraph(t)
+	applied, err := g.UpdateNodeIf(999, func(map[string]any) bool { return true }, func(map[string]any) map[string]any { return map[string]any{} })
+	if err != nil {
+		t.Fatalf("UpdateNodeIf: got error %v, want nil", err)
+	}
+	if applied {
+		t.Fatal("UpdateNodeIf: applied = true for a nonexistent id, want false")
+	}
+}
+
+// TestGraphUpdateNodeIf_ConcurrentOnlyOneApplies is the real point of UpdateNodeIf over a
+// caller-composed GetNode+UpdateNode: many goroutines racing the exact same check-then-flip
+// against the same node must yield EXACTLY one success, proven under -race, not just asserted by
+// inspecting the locking code.
+func TestGraphUpdateNodeIf_ConcurrentOnlyOneApplies(t *testing.T) {
+	g := openTestGraph(t)
+	id, err := g.AddNode("Note", map[string]any{"status": "open"})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+
+	isOpen := func(props map[string]any) bool { return props["status"] == "open" }
+
+	const n = 50
+	results := make([]bool, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			applied, err := g.UpdateNodeIf(id, isOpen, func(map[string]any) map[string]any {
+				return map[string]any{"status": "done"}
+			})
+			if err != nil {
+				t.Errorf("UpdateNodeIf goroutine %d: %v", i, err)
+				return
+			}
+			results[i] = applied
+		}(i)
+	}
+	wg.Wait()
+
+	successes := 0
+	for _, applied := range results {
+		if applied {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("got %d successful UpdateNodeIf calls racing the same predicate, want exactly 1", successes)
 	}
 }
 
