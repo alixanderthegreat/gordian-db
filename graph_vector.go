@@ -62,6 +62,24 @@ func (g *Graph) IndexNodeVector(label string, id int64, vec []float32) error {
 	return nil
 }
 
+// GetNodeVector reads back the real, already-stored vector IndexNodeVector/AddNodeWithVector
+// wrote for id - a real, generically useful primitive found necessary live (kata cycle 48): a
+// real backfill pass over already-embedded nodes needs each one's own real vector to compute
+// similarity against, and re-embedding real text just to get back a vector that already exists
+// would be pure waste (real GPU/embedder time, per this project's own ~250ms-per-embed finding
+// earlier this session). Mirrors GetNode's own (Node, bool, error) shape exactly. ok=false, not
+// an error, if no vector was ever indexed for this (label, id).
+func (g *Graph) GetNodeVector(label string, id int64) ([]float32, bool, error) {
+	raw, ok, err := g.store.Get(vectorKey(label, id))
+	if err != nil {
+		return nil, false, fmt.Errorf("get vector: %w", err)
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return decodeVector(raw), true, nil
+}
+
 // IndexNodeFilteredVector mirrors IndexNodeVector, scoped additionally by (filterKey,
 // filterValue) - the write-side half of FilteredVectorTopK, and the real primitive entries/facts'
 // port needs alongside IndexNode's own event_id exact-match index on the SAME node (cycle 28's
