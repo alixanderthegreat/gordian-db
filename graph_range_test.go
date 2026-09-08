@@ -19,6 +19,65 @@ func seedChunk(t *testing.T, g *Graph, bookID int64, chunkIndex int64, text stri
 	return id
 }
 
+// TestIndexNodeRange_ComposesWithFilteredVector proves the real composability point of this
+// extraction (kata cycle 31): a node can carry BOTH a range index AND a filtered vector, the
+// exact real shape simple-bot's own BookChunk needs (RangeScan for SurroundingChunks/ChunkRange,
+// FilteredVectorTopK for subject-filtered search) - neither structure interferes with the other.
+func TestIndexNodeRange_ComposesWithFilteredVector(t *testing.T) {
+	g := openTestGraph(t)
+	vecs := genVectors(1)
+
+	id, err := g.AddNode("Chunk", map[string]any{"book_id": int64(1), "chunk_index": int64(5), "text": "x"})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.IndexNodeRange("Chunk", "book_id", int64(1), "chunk_index", int64(5), id); err != nil {
+		t.Fatalf("IndexNodeRange: %v", err)
+	}
+	if err := g.IndexNodeFilteredVector("Chunk", "book_id", "1", id, vecs[0]); err != nil {
+		t.Fatalf("IndexNodeFilteredVector: %v", err)
+	}
+
+	rangeGot, err := g.RangeScan("Chunk", "book_id", 1, "chunk_index", 0, 10)
+	if err != nil {
+		t.Fatalf("RangeScan: %v", err)
+	}
+	if len(rangeGot) != 1 || rangeGot[0].ID != id {
+		t.Fatalf("RangeScan = %+v, want exactly [id=%d]", rangeGot, id)
+	}
+
+	vecGot, err := g.FilteredVectorTopK("Chunk", "book_id", "1", vecs[0], 10)
+	if err != nil {
+		t.Fatalf("FilteredVectorTopK: %v", err)
+	}
+	if len(vecGot) != 1 || vecGot[0].ID != id {
+		t.Fatalf("FilteredVectorTopK = %+v, want exactly [id=%d]", vecGot, id)
+	}
+}
+
+// TestAddRangeIndexedNode_DoesNotOrphanNodeOnBadType proves the real fix made during this
+// extraction: a wrong-typed parent/range value must fail BEFORE any node is created, not leave an
+// unindexed orphan behind.
+func TestAddRangeIndexedNode_DoesNotOrphanNodeOnBadType(t *testing.T) {
+	g := openTestGraph(t)
+	before, err := g.AllNodes("Chunk")
+	if err != nil {
+		t.Fatalf("AllNodes: %v", err)
+	}
+
+	if _, err := g.AddRangeIndexedNode("Chunk", map[string]any{"book_id": "not-a-number", "chunk_index": int64(0)}, "book_id", "chunk_index"); err == nil {
+		t.Fatal("AddRangeIndexedNode with a non-int64 book_id: want an error, got nil")
+	}
+
+	after, err := g.AllNodes("Chunk")
+	if err != nil {
+		t.Fatalf("AllNodes: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("AllNodes(Chunk) count changed from %d to %d after a failed AddRangeIndexedNode - an orphan node was created", len(before), len(after))
+	}
+}
+
 // TestRangeScan_BoundedRange mirrors SurroundingChunks' real shape exactly: chunk_index BETWEEN
 // two bounds, scoped to one book, in ascending order.
 func TestRangeScan_BoundedRange(t *testing.T) {
