@@ -150,6 +150,38 @@ func (g *Graph) GetNode(id int64) (Node, bool, error) {
 	return n, true, nil
 }
 
+// AllNodes returns every node with the given label - kata cycle 23's own real discovery: a
+// caller outside package gordian (like simple-bot) has no way to construct a raw tagNode scan
+// prefix itself (tagNode is unexported), so "list every Book/Resource node" - the real shape
+// FindBook, LibrarySubjects, and IncompleteBooks/IncompleteResources all need (a full scan +
+// Go-side filter/comparison, per cycle 21's own "not every query needs an index" finding) - had
+// no way to be expressed at all until this existed. Deliberately a full scan over every label,
+// not just the target one (matching cycle 21 item 4's own documented, accepted inefficiency) -
+// no per-label key layout exists to scan more narrowly, and nothing so far has shown that scan
+// cost actually matters at real scale.
+func (g *Graph) AllNodes(label string) ([]Node, error) {
+	var out []Node
+	var decodeErr error
+	err := g.store.Scan([]byte{tagNode}, func(key, value []byte) bool {
+		var n Node
+		if err := json.Unmarshal(value, &n); err != nil {
+			decodeErr = fmt.Errorf("decode node at key %x: %w", key, err)
+			return false
+		}
+		if n.Label == label {
+			out = append(out, n)
+		}
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	if decodeErr != nil {
+		return nil, decodeErr
+	}
+	return out, nil
+}
+
 // ErrNodeNotFound is returned by AddEdge when either endpoint doesn't exist, and by UpdateNode
 // when id doesn't exist.
 var ErrNodeNotFound = errors.New("gordian: node not found")

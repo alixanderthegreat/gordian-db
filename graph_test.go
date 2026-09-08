@@ -210,6 +210,58 @@ func TestGraphUpdateNodeIf_ConcurrentOnlyOneApplies(t *testing.T) {
 	}
 }
 
+// TestGraphAllNodes_FiltersByLabelAndFindsEveryMatch proves AllNodes' real contract (kata cycle
+// 23's item 0-adjacent finding): every node of the target label is returned, and a
+// differently-labeled node is excluded - the same "prove exclusion, not just inclusion"
+// discipline as TestGraphNeighborsFiltersByLabel.
+func TestGraphAllNodes_FiltersByLabelAndFindsEveryMatch(t *testing.T) {
+	g := openTestGraph(t)
+
+	book1, err := g.AddNode("Book", map[string]any{"filename": "a.epub"})
+	if err != nil {
+		t.Fatalf("AddNode book1: %v", err)
+	}
+	book2, err := g.AddNode("Book", map[string]any{"filename": "b.epub"})
+	if err != nil {
+		t.Fatalf("AddNode book2: %v", err)
+	}
+	if _, err := g.AddNode("Resource", map[string]any{"filename": "c.txt"}); err != nil {
+		t.Fatalf("AddNode resource: %v", err)
+	}
+
+	books, err := g.AllNodes("Book")
+	if err != nil {
+		t.Fatalf("AllNodes: %v", err)
+	}
+	if len(books) != 2 {
+		t.Fatalf("AllNodes(Book) = %+v, want 2 nodes", books)
+	}
+	gotIDs := map[int64]bool{books[0].ID: true, books[1].ID: true}
+	if !gotIDs[book1] || !gotIDs[book2] {
+		t.Fatalf("AllNodes(Book) = %+v, want both book1=%d and book2=%d", books, book1, book2)
+	}
+	for _, n := range books {
+		if n.Label != "Book" {
+			t.Fatalf("AllNodes(Book) returned a %q-labeled node: %+v", n.Label, n)
+		}
+	}
+}
+
+// TestGraphAllNodes_NoMatches proves an empty (nil, not error) result for a label with no nodes.
+func TestGraphAllNodes_NoMatches(t *testing.T) {
+	g := openTestGraph(t)
+	if _, err := g.AddNode("Entity", nil); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	got, err := g.AllNodes("Book")
+	if err != nil {
+		t.Fatalf("AllNodes: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("AllNodes(Book) = %+v, want empty", got)
+	}
+}
+
 func TestGraphAddEdgeRequiresRealEndpoints(t *testing.T) {
 	g := openTestGraph(t)
 	a, err := g.AddNode("A", nil)
