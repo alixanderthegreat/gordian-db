@@ -264,3 +264,100 @@ func TestAddIndexedNode_UnsupportedTypeSkipped(t *testing.T) {
 		t.Fatalf("GetNode(id) = %+v,%v,%v, want the node itself unaffected", n, ok, err)
 	}
 }
+
+// TestDeleteNode_RemovesRealEdgesBothDirections proves kata cycle 43's own real, live-found fix:
+// deleting a node that has edges in BOTH directions (some it points to, some pointing to it)
+// leaves no dangling edge behind - confirmed from every remaining node's own perspective, not
+// just that the deleted node itself is gone. This is the exact real bug found live: tools/
+// graph-ui's own neighborhood view crashed trying to render an edge referencing a node that no
+// longer existed, because DeleteNode never cleaned up edges at all before this fix.
+func TestDeleteNode_RemovesRealEdgesBothDirections(t *testing.T) {
+	g := openTestGraph(t)
+	center, err := g.AddNode("Entity", map[string]any{"name": "son"})
+	if err != nil {
+		t.Fatalf("AddNode center: %v", err)
+	}
+	a, err := g.AddNode("Fact", map[string]any{"text": "fact a"})
+	if err != nil {
+		t.Fatalf("AddNode a: %v", err)
+	}
+	b, err := g.AddNode("Fact", map[string]any{"text": "fact b"})
+	if err != nil {
+		t.Fatalf("AddNode b: %v", err)
+	}
+	// a --MENTIONS--> center (center has an IN edge), center --OWNS--> b (center has an OUT edge)
+	if err := g.AddEdge(a, center, "MENTIONS"); err != nil {
+		t.Fatalf("AddEdge a->center: %v", err)
+	}
+	if err := g.AddEdge(center, b, "OWNS"); err != nil {
+		t.Fatalf("AddEdge center->b: %v", err)
+	}
+
+	if err := g.DeleteNode(center); err != nil {
+		t.Fatalf("DeleteNode: %v", err)
+	}
+
+	// From a's own perspective: no more outgoing edge to the deleted center.
+	aOut, err := g.OutEdges(a)
+	if err != nil {
+		t.Fatalf("OutEdges(a): %v", err)
+	}
+	if len(aOut) != 0 {
+		t.Fatalf("OutEdges(a) after deleting center = %+v, want empty (no dangling edge)", aOut)
+	}
+	// From b's own perspective: no more incoming edge from the deleted center.
+	bIn, err := g.InEdges(b)
+	if err != nil {
+		t.Fatalf("InEdges(b): %v", err)
+	}
+	if len(bIn) != 0 {
+		t.Fatalf("InEdges(b) after deleting center = %+v, want empty (no dangling edge)", bIn)
+	}
+	// The deleted node's own edge lists are empty too (it no longer exists, but the query itself
+	// must not error or return stale data).
+	centerOut, err := g.OutEdges(center)
+	if err != nil {
+		t.Fatalf("OutEdges(center): %v", err)
+	}
+	if len(centerOut) != 0 {
+		t.Fatalf("OutEdges(deleted center) = %+v, want empty", centerOut)
+	}
+}
+
+// TestDeleteNode_LeavesUnrelatedEdgesIntact proves DeleteNode's own edge cleanup removes exactly
+// the edges touching the deleted node - a sibling edge between two OTHER nodes must survive
+// untouched, the same "prove exclusion, not just inclusion" discipline used throughout this
+// project.
+func TestDeleteNode_LeavesUnrelatedEdgesIntact(t *testing.T) {
+	g := openTestGraph(t)
+	doomed, err := g.AddNode("Entity", map[string]any{"name": "doomed"})
+	if err != nil {
+		t.Fatalf("AddNode doomed: %v", err)
+	}
+	a, err := g.AddNode("Fact", map[string]any{"text": "a"})
+	if err != nil {
+		t.Fatalf("AddNode a: %v", err)
+	}
+	survivor, err := g.AddNode("Entity", map[string]any{"name": "survivor"})
+	if err != nil {
+		t.Fatalf("AddNode survivor: %v", err)
+	}
+	if err := g.AddEdge(a, doomed, "MENTIONS"); err != nil {
+		t.Fatalf("AddEdge a->doomed: %v", err)
+	}
+	if err := g.AddEdge(a, survivor, "MENTIONS"); err != nil {
+		t.Fatalf("AddEdge a->survivor: %v", err)
+	}
+
+	if err := g.DeleteNode(doomed); err != nil {
+		t.Fatalf("DeleteNode: %v", err)
+	}
+
+	aOut, err := g.OutEdges(a)
+	if err != nil {
+		t.Fatalf("OutEdges(a): %v", err)
+	}
+	if len(aOut) != 1 || aOut[0].To != survivor {
+		t.Fatalf("OutEdges(a) after deleting doomed = %+v, want exactly [to=%d survivor]", aOut, survivor)
+	}
+}
