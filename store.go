@@ -97,6 +97,33 @@ func (s *Store) Scan(prefix []byte, fn func(key, value []byte) bool) error {
 	return iter.Error()
 }
 
+// ScanRange calls fn for every key in [lower, upper) - an explicit-bounds scan, unlike Scan's own
+// single-prefix-derived bounds, needed for kata cycle 36's own real requirement: cursor-based
+// pagination over an arbitrary starting key (e.g. "every node after id N"), which no single
+// prefix can express (a prefix scan can only start at the beginning of its own prefix range, not
+// partway through it). upper=nil means no upper bound (scan runs to the end of the keyspace),
+// matching prefixUpperBound's own convention for an all-0xFF prefix. Same early-stop-via-false and
+// key/value-only-valid-during-the-call conventions as Scan.
+func (s *Store) ScanRange(lower, upper []byte, fn func(key, value []byte) bool) error {
+	opts := &pebble.IterOptions{LowerBound: lower, UpperBound: upper}
+	iter, err := s.db.NewIter(opts)
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+
+	for valid := iter.First(); valid; valid = iter.Next() {
+		value, err := iter.ValueAndErr()
+		if err != nil {
+			return err
+		}
+		if !fn(iter.Key(), value) {
+			break
+		}
+	}
+	return iter.Error()
+}
+
 // prefixUpperBound returns the smallest key greater than every key starting with prefix - the
 // standard exclusive upper bound for a prefix scan (increment the last byte, carrying into
 // preceding bytes on 0xFF overflow). Returns nil (no upper bound - scan runs to the end of the
