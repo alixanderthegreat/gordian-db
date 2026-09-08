@@ -166,3 +166,72 @@ func TestPrefixUpperBound(t *testing.T) {
 		})
 	}
 }
+
+// TestStoreScanRange_BoundedArbitraryRange proves ScanRange (kata cycle 36) correctly bounds an
+// arbitrary [lower,upper) range, not just a prefix-shaped one - the real property Scan's own
+// single-prefix design cannot express, needed for cursor-based pagination starting partway
+// through a keyspace.
+func TestStoreScanRange_BoundedArbitraryRange(t *testing.T) {
+	s := openTestStore(t)
+	keys := [][]byte{[]byte("a"), []byte("b"), []byte("c"), []byte("d"), []byte("e")}
+	for _, k := range keys {
+		if err := s.Put(k, []byte("v")); err != nil {
+			t.Fatalf("put %s: %v", k, err)
+		}
+	}
+
+	var got []string
+	if err := s.ScanRange([]byte("b"), []byte("d"), func(key, value []byte) bool {
+		got = append(got, string(key))
+		return true
+	}); err != nil {
+		t.Fatalf("ScanRange: %v", err)
+	}
+	want := []string{"b", "c"} // [b, d) - inclusive lower, exclusive upper
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("ScanRange(b,d) = %v, want %v", got, want)
+	}
+}
+
+// TestStoreScanRange_NilUpperScansToEnd proves nil upper means "no bound" - the same convention
+// prefixUpperBound already establishes for an all-0xFF prefix.
+func TestStoreScanRange_NilUpperScansToEnd(t *testing.T) {
+	s := openTestStore(t)
+	for _, k := range []string{"a", "b", "c"} {
+		if err := s.Put([]byte(k), []byte("v")); err != nil {
+			t.Fatalf("put %s: %v", k, err)
+		}
+	}
+
+	var got []string
+	if err := s.ScanRange([]byte("b"), nil, func(key, value []byte) bool {
+		got = append(got, string(key))
+		return true
+	}); err != nil {
+		t.Fatalf("ScanRange: %v", err)
+	}
+	if len(got) != 2 || got[0] != "b" || got[1] != "c" {
+		t.Fatalf("ScanRange(b,nil) = %v, want [b c]", got)
+	}
+}
+
+// TestStoreScanRange_StopsEarly mirrors TestStoreScanStopsEarly's own real discipline for Scan.
+func TestStoreScanRange_StopsEarly(t *testing.T) {
+	s := openTestStore(t)
+	for _, k := range []string{"a", "b", "c", "d"} {
+		if err := s.Put([]byte(k), []byte("v")); err != nil {
+			t.Fatalf("put %s: %v", k, err)
+		}
+	}
+
+	var got []string
+	if err := s.ScanRange([]byte("a"), nil, func(key, value []byte) bool {
+		got = append(got, string(key))
+		return len(got) < 2
+	}); err != nil {
+		t.Fatalf("ScanRange: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ScanRange with early stop = %v, want exactly 2 entries", got)
+	}
+}
