@@ -56,6 +56,24 @@ func propIndexKey(label, propKey, propValue string, id int64) []byte {
 	return append(key, idBuf...)
 }
 
+// IndexNode writes one durable secondary-index entry for an EXISTING node id, so it can later be
+// found via FindByPropertyIndex(label, propKey, propValue). Silently does nothing if propValue's
+// type isn't supported by canonicalPropValue (string or an integer kind) - matching AddNode's own
+// permissiveness about property shapes, not an error. Extracted (kata cycle 28) from
+// AddIndexedNode's own loop body so a node needing MULTIPLE kinds of secondary structure (an
+// exact-match index AND a filtered vector, say - entries' own real shape) can compose them
+// explicitly instead of needing a dedicated AddXWithY method for every combination.
+func (g *Graph) IndexNode(label, propKey string, propValue any, id int64) error {
+	s, ok := canonicalPropValue(propValue)
+	if !ok {
+		return nil
+	}
+	if err := g.store.Put(propIndexKey(label, propKey, s, id), []byte{}); err != nil {
+		return fmt.Errorf("put property index entry: %w", err)
+	}
+	return nil
+}
+
 // AddIndexedNode behaves exactly like AddNode, additionally writing a durable secondary-index
 // entry for each of indexedKeys whose value in props has a supported type (see
 // canonicalPropValue) - currently string and integer kinds. An indexed key with an unsupported
@@ -67,12 +85,8 @@ func (g *Graph) AddIndexedNode(label string, props map[string]any, indexedKeys .
 		return 0, err
 	}
 	for _, k := range indexedKeys {
-		s, ok := canonicalPropValue(props[k])
-		if !ok {
-			continue
-		}
-		if err := g.store.Put(propIndexKey(label, k, s, id), []byte{}); err != nil {
-			return 0, fmt.Errorf("put property index entry: %w", err)
+		if err := g.IndexNode(label, k, props[k], id); err != nil {
+			return 0, err
 		}
 	}
 	return id, nil
