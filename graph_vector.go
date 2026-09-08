@@ -73,6 +73,30 @@ func (g *Graph) IndexNodeFilteredVector(label, filterKey, filterValue string, id
 	return nil
 }
 
+// DeindexNodeVector removes the label-scoped vector entry IndexNodeVector/AddNodeWithVector wrote
+// for id - kata cycle 29's own real find: DeleteNode only ever cleaned up propIndexKey entries
+// (graph_property.go), never a node's vector entry, so deleting a vector-carrying node (e.g.
+// simple-bot's real DeletePartialResource, cleaning up ResourceChunk nodes after a failed
+// ingestion) without this would leave a real dangling vector - VectorTopK would keep scoring and
+// trying to resolve it, hitting ErrNodeNotFound (dangling reference) on every future call, not a
+// cosmetic leftover. Safe to call even if no vector entry exists (Store.Delete is a no-op for a
+// missing key).
+func (g *Graph) DeindexNodeVector(label string, id int64) error {
+	if err := g.store.Delete(vectorKey(label, id)); err != nil {
+		return fmt.Errorf("delete vector: %w", err)
+	}
+	return nil
+}
+
+// DeindexNodeFilteredVector mirrors DeindexNodeVector for the compound-filtered case -
+// IndexNodeFilteredVector's own real deletion counterpart.
+func (g *Graph) DeindexNodeFilteredVector(label, filterKey, filterValue string, id int64) error {
+	if err := g.store.Delete(filteredVectorKey(label, filterKey, filterValue, id)); err != nil {
+		return fmt.Errorf("delete filtered vector index entry: %w", err)
+	}
+	return nil
+}
+
 // AddNodeWithVector creates a node (exactly like AddNode) and stores vec under a label-scoped
 // vector key, so VectorTopK can scan just this label's vectors in one pass. vec is stored
 // separately from Props deliberately - Props round-trips through JSON (Node's own encoding), and
