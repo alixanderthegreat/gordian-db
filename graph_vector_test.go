@@ -53,6 +53,59 @@ func TestVectorTopK_ExcludesOtherLabels(t *testing.T) {
 	}
 }
 
+// TestDeindexNodeVector_RemovesVectorNotOtherNodes proves DeindexNodeVector removes exactly the
+// target node's own vector entry - a sibling node's vector under the same label must survive, and
+// the target node itself (its Props, via GetNode) is untouched, only its vector is gone from
+// future VectorTopK scans.
+func TestDeindexNodeVector_RemovesVectorNotOtherNodes(t *testing.T) {
+	g := openTestGraph(t)
+	vecs := genVectors(2)
+	target, err := g.AddNodeWithVector("ResourceChunk", map[string]any{"text": "target"}, vecs[0])
+	if err != nil {
+		t.Fatalf("AddNodeWithVector target: %v", err)
+	}
+	survivor, err := g.AddNodeWithVector("ResourceChunk", map[string]any{"text": "survivor"}, vecs[1])
+	if err != nil {
+		t.Fatalf("AddNodeWithVector survivor: %v", err)
+	}
+
+	if err := g.DeindexNodeVector("ResourceChunk", target); err != nil {
+		t.Fatalf("DeindexNodeVector: %v", err)
+	}
+
+	got, err := g.VectorTopK("ResourceChunk", vecs[0], 10)
+	if err != nil {
+		t.Fatalf("VectorTopK: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != survivor {
+		t.Fatalf("VectorTopK after DeindexNodeVector = %+v, want exactly [survivor=%d]", got, survivor)
+	}
+	if n, found, err := g.GetNode(target); err != nil || !found {
+		t.Fatalf("GetNode(target) = %+v,%v,%v, want the node itself to still exist", n, found, err)
+	}
+}
+
+// TestDeindexNodeFilteredVector_RemovesEntryNotOtherFilterValues mirrors
+// TestDeindexNodeVector_RemovesVectorNotOtherNodes for the compound-filtered case.
+func TestDeindexNodeFilteredVector_RemovesEntryNotOtherFilterValues(t *testing.T) {
+	g := openTestGraph(t)
+	vecs := genVectors(2)
+	target := addFilteredVectorNode(t, g, "Fact", "room_sender", "room1\x00alice", nil, vecs[0])
+	survivor := addFilteredVectorNode(t, g, "Fact", "room_sender", "room1\x00alice", nil, vecs[1])
+
+	if err := g.DeindexNodeFilteredVector("Fact", "room_sender", "room1\x00alice", target); err != nil {
+		t.Fatalf("DeindexNodeFilteredVector: %v", err)
+	}
+
+	got, err := g.FilteredVectorTopK("Fact", "room_sender", "room1\x00alice", vecs[0], 10)
+	if err != nil {
+		t.Fatalf("FilteredVectorTopK: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != survivor {
+		t.Fatalf("FilteredVectorTopK after DeindexNodeFilteredVector = %+v, want exactly [survivor=%d]", got, survivor)
+	}
+}
+
 // TestVectorTopK_ReturnsCorrectScores proves the real point of kata cycle 29's ScoredNode fix:
 // the returned scores are the actual cosine similarities (checked against an independently
 // computed value), not just used internally for ranking and then discarded, and they come back
