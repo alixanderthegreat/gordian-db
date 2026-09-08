@@ -1,6 +1,9 @@
 package gordian
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestFindByPropertyIndex(t *testing.T) {
 	g := openTestGraph(t)
@@ -192,6 +195,57 @@ func TestFindByPropertyIndexFiltered_OpenNotesShape(t *testing.T) {
 		if n.ID != want[i] {
 			t.Fatalf("FindByPropertyIndexFiltered[%d].ID = %d, want %d (order: %v)", i, n.ID, want[i], got)
 		}
+	}
+}
+
+// TestDeleteNode_RemovesNodeAndIndexEntry proves DeleteNode's real, symmetric contract with
+// AddIndexedNode (kata cycle 23's item 0): the node itself is gone (GetNode ok=false) AND its
+// index entry is gone too (FindByPropertyIndex no longer returns it) - not just one or the other.
+func TestDeleteNode_RemovesNodeAndIndexEntry(t *testing.T) {
+	g := openTestGraph(t)
+	id, err := g.AddIndexedNode("Book", map[string]any{"filename": "moby-dick.epub"}, "filename")
+	if err != nil {
+		t.Fatalf("AddIndexedNode: %v", err)
+	}
+
+	if err := g.DeleteNode(id, "filename"); err != nil {
+		t.Fatalf("DeleteNode: %v", err)
+	}
+
+	if _, ok, err := g.GetNode(id); err != nil || ok {
+		t.Fatalf("GetNode after DeleteNode = ok=%v err=%v, want ok=false, err=nil", ok, err)
+	}
+
+	found, err := g.FindByPropertyIndex("Book", "filename", "moby-dick.epub")
+	if err != nil {
+		t.Fatalf("FindByPropertyIndex: %v", err)
+	}
+	if len(found) != 0 {
+		t.Fatalf("FindByPropertyIndex after DeleteNode = %+v, want empty (index entry must be gone too)", found)
+	}
+}
+
+// TestDeleteNode_PlainNode proves DeleteNode works with no indexedKeys at all, for a node that
+// was never indexed - the AddNode/AddIndexedNode symmetry DeleteNode's own doc comment claims.
+func TestDeleteNode_PlainNode(t *testing.T) {
+	g := openTestGraph(t)
+	id, err := g.AddNode("Reaction", map[string]any{"key": "thumbsup"})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.DeleteNode(id); err != nil {
+		t.Fatalf("DeleteNode: %v", err)
+	}
+	if _, ok, _ := g.GetNode(id); ok {
+		t.Fatal("GetNode after DeleteNode: still found")
+	}
+}
+
+// TestDeleteNode_MissingNode proves ErrNodeNotFound for a never-allocated id, not a silent no-op.
+func TestDeleteNode_MissingNode(t *testing.T) {
+	g := openTestGraph(t)
+	if err := g.DeleteNode(999); !errors.Is(err, ErrNodeNotFound) {
+		t.Fatalf("DeleteNode(999): got %v, want ErrNodeNotFound", err)
 	}
 }
 

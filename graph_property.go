@@ -78,6 +78,40 @@ func (g *Graph) AddIndexedNode(label string, props map[string]any, indexedKeys .
 	return id, nil
 }
 
+// DeleteNode permanently removes node id, along with any secondary-index entries recorded for
+// indexedKeys - kata cycle 23's item 0, needed for simple-bot's real DeletePartialBook/
+// DeletePartialResource (a genuine hard delete, unlike notes/books.complete's soft "mark done"
+// pattern - AddNode/AddIndexedNode/UpdateNode/UpdateNodeIf had no reason to build this before).
+// indexedKeys must name whatever keys were originally passed to AddIndexedNode for this node -
+// DeleteNode has no other record of which index entries exist, the same caller-must-know-what-
+// was-indexed limitation UpdateNode's own doc comment already established for updates. Returns
+// ErrNodeNotFound if id doesn't exist (does not silently no-op).
+func (g *Graph) DeleteNode(id int64, indexedKeys ...string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	n, ok, err := g.getNodeLocked(id)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: id=%d", ErrNodeNotFound, id)
+	}
+	for _, k := range indexedKeys {
+		s, ok := canonicalPropValue(n.Props[k])
+		if !ok {
+			continue
+		}
+		if err := g.store.Delete(propIndexKey(n.Label, k, s, id)); err != nil {
+			return fmt.Errorf("delete property index entry: %w", err)
+		}
+	}
+	if err := g.store.Delete(nodeKey(id)); err != nil {
+		return fmt.Errorf("delete node %d: %w", id, err)
+	}
+	return nil
+}
+
 // FindByPropertyIndex looks up every node id previously indexed under (label, propKey,
 // propValue) via AddIndexedNode, and resolves them to full Nodes. propValue must be a type
 // canonicalPropValue supports (string or an integer kind) and must match the type given to
