@@ -93,6 +93,28 @@ func (g *Graph) IndexNodeRange(label, parentKey string, parentValue any, rangeKe
 	return nil
 }
 
+// DeindexNodeRange removes the range-index entry IndexNodeRange/AddRangeIndexedNode wrote for id
+// - kata cycle 31's own real find, the same class of gap cycle 29's DeindexNodeVector closed for
+// vector entries: DeleteNode never cleaned up a range-index entry either, so deleting a range-
+// indexed node (simple-bot's real DeletePartialBook, cleaning up BookChunk nodes after a failed
+// ingestion) without this would leave a real dangling entry - RangeScan would keep returning an
+// id that no longer resolves, hitting ErrNodeNotFound, not just silently returning fewer results.
+// Safe to call even if no range entry exists (Store.Delete is a no-op for a missing key).
+func (g *Graph) DeindexNodeRange(label, parentKey string, parentValue any, rangeKey string, rangeValue any, id int64) error {
+	parentInt, ok := toInt64(parentValue)
+	if !ok {
+		return fmt.Errorf("gordian: DeindexNodeRange: parentValue for %q is not an int64-shaped value", parentKey)
+	}
+	rangeInt, ok := toInt64(rangeValue)
+	if !ok {
+		return fmt.Errorf("gordian: DeindexNodeRange: rangeValue for %q is not an int64-shaped value", rangeKey)
+	}
+	if err := g.store.Delete(rangeIndexKey(label, parentKey, parentInt, rangeKey, rangeInt, id)); err != nil {
+		return fmt.Errorf("delete range index entry: %w", err)
+	}
+	return nil
+}
+
 // AddRangeIndexedNode behaves like AddNode, additionally writing a durable range-index entry via
 // IndexNodeRange - kata cycle 24's own real primitive, grounded in SurroundingChunks/ChunkRange's
 // real shape (a chunk belongs to one parent book, ordered by chunk_index). Validates
