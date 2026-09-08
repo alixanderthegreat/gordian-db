@@ -53,6 +53,38 @@ func TestVectorTopK_ExcludesOtherLabels(t *testing.T) {
 	}
 }
 
+// TestVectorTopK_ReturnsCorrectScores proves the real point of kata cycle 29's ScoredNode fix:
+// the returned scores are the actual cosine similarities (checked against an independently
+// computed value), not just used internally for ranking and then discarded, and they come back
+// in real descending order.
+func TestVectorTopK_ReturnsCorrectScores(t *testing.T) {
+	g := openTestGraph(t)
+	vecs := genVectors(20)
+	for i, v := range vecs {
+		if _, err := g.AddNodeWithVector("Fact", map[string]any{"i": i}, v); err != nil {
+			t.Fatalf("AddNodeWithVector %d: %v", i, err)
+		}
+	}
+
+	query := genVectors(1)[0]
+	got, err := g.VectorTopK("Fact", query, 5)
+	if err != nil {
+		t.Fatalf("VectorTopK: %v", err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("len(got) = %d, want 5", len(got))
+	}
+	for i, sn := range got {
+		want := cosineSimilarity(query, vecs[int(sn.Props["i"].(float64))])
+		if sn.Score != want {
+			t.Fatalf("got[%d].Score = %v, want %v (independently computed)", i, sn.Score, want)
+		}
+		if i > 0 && sn.Score > got[i-1].Score {
+			t.Fatalf("got[%d].Score = %v > got[%d].Score = %v, want descending order", i, sn.Score, i-1, got[i-1].Score)
+		}
+	}
+}
+
 // TestVectorTopK_MatchesNaiveFullSort cross-checks VectorTopK's min-heap bookkeeping against an
 // independent, deliberately naive full-sort implementation over the same data - the same
 // cross-check discipline cycle 20's own bruteForceCosineTopK test used (an implementation that
