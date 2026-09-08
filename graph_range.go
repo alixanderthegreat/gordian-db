@@ -69,21 +69,42 @@ func rangeIndexKey(label, parentKey string, parentValue int64, rangeKey string, 
 	return key
 }
 
-// AddRangeIndexedNode behaves like AddNode, additionally writing a durable range-index entry
-// keyed by (label, parentKey, parentValue, rangeKey, rangeValue) - kata cycle 24's own real
-// primitive, grounded in SurroundingChunks/ChunkRange's real shape (a chunk belongs to one parent
-// book, ordered by chunk_index). props[parentKey] and props[rangeKey] must both be int64-shaped
-// (int, int32, or int64) - unlike AddIndexedNode's own permissive "skip unsupported types"
-// behavior, a missing or wrong-typed parent/range value here is an error, not a silent skip,
-// since a range-indexed node with no range entry at all would be silently unfindable via
-// RangeScan with no indication why.
-func (g *Graph) AddRangeIndexedNode(label string, props map[string]any, parentKey, rangeKey string) (int64, error) {
-	parentValue, ok := toInt64(props[parentKey])
+// IndexNodeRange writes one durable range-index entry for an EXISTING node id, keyed by (label,
+// parentKey, parentValue, rangeKey, rangeValue) - extracted (kata cycle 31) from
+// AddRangeIndexedNode's own body so a node needing more than one kind of secondary structure can
+// compose them explicitly, the same real composability need cycle 28 already found for
+// IndexNode/IndexNodeVector (simple-bot's real BookChunk needs a range index AND a filtered
+// vector on the same node). parentValue/rangeValue must both be int64-shaped (int, int32, or
+// int64) - unlike AddIndexedNode's own permissive "skip unsupported types" behavior, a wrong-typed
+// value here is an error, not a silent skip, since a range-indexed node with no range entry at
+// all would be silently unfindable via RangeScan with no indication why.
+func (g *Graph) IndexNodeRange(label, parentKey string, parentValue any, rangeKey string, rangeValue any, id int64) error {
+	parentInt, ok := toInt64(parentValue)
 	if !ok {
+		return fmt.Errorf("gordian: IndexNodeRange: parentValue for %q is not an int64-shaped value", parentKey)
+	}
+	rangeInt, ok := toInt64(rangeValue)
+	if !ok {
+		return fmt.Errorf("gordian: IndexNodeRange: rangeValue for %q is not an int64-shaped value", rangeKey)
+	}
+	if err := g.store.Put(rangeIndexKey(label, parentKey, parentInt, rangeKey, rangeInt, id), []byte{}); err != nil {
+		return fmt.Errorf("put range index entry: %w", err)
+	}
+	return nil
+}
+
+// AddRangeIndexedNode behaves like AddNode, additionally writing a durable range-index entry via
+// IndexNodeRange - kata cycle 24's own real primitive, grounded in SurroundingChunks/ChunkRange's
+// real shape (a chunk belongs to one parent book, ordered by chunk_index). Validates
+// props[parentKey]/props[rangeKey] BEFORE calling AddNode - unlike IndexNodeRange's own bare
+// validate-then-put (fine for a caller indexing an already-real node), AddRangeIndexedNode must
+// not create an orphaned, unindexed node if the types are wrong, so it checks first and only
+// creates the node once both values are known-good.
+func (g *Graph) AddRangeIndexedNode(label string, props map[string]any, parentKey, rangeKey string) (int64, error) {
+	if _, ok := toInt64(props[parentKey]); !ok {
 		return 0, fmt.Errorf("gordian: AddRangeIndexedNode: props[%q] is not an int64-shaped value", parentKey)
 	}
-	rangeValue, ok := toInt64(props[rangeKey])
-	if !ok {
+	if _, ok := toInt64(props[rangeKey]); !ok {
 		return 0, fmt.Errorf("gordian: AddRangeIndexedNode: props[%q] is not an int64-shaped value", rangeKey)
 	}
 
@@ -91,8 +112,8 @@ func (g *Graph) AddRangeIndexedNode(label string, props map[string]any, parentKe
 	if err != nil {
 		return 0, err
 	}
-	if err := g.store.Put(rangeIndexKey(label, parentKey, parentValue, rangeKey, rangeValue, id), []byte{}); err != nil {
-		return 0, fmt.Errorf("put range index entry: %w", err)
+	if err := g.IndexNodeRange(label, parentKey, props[parentKey], rangeKey, props[rangeKey], id); err != nil {
+		return 0, err
 	}
 	return id, nil
 }
