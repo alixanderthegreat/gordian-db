@@ -101,10 +101,15 @@ func (g *Graph) AddIndexedNode(label string, props map[string]any, indexedKeys .
 // was-indexed limitation UpdateNode's own doc comment already established for updates. Returns
 // ErrNodeNotFound if id doesn't exist (does not silently no-op).
 //
-// The label index (kata cycle 32) is the one exception to "caller must know what was indexed" -
-// unlike property/range/vector indexes, DeleteNode already has n.Label from its own
-// getNodeLocked call above, so it cleans that entry up automatically, with no indexedKeys
-// cooperation required. Without this, AllNodes would return a dangling id for every deleted node.
+// The label index (kata cycle 32) and every real edge (kata cycle 43) are the two exceptions to
+// "caller must know what was indexed" - unlike property/range/vector indexes, both are fully
+// discoverable with no caller cooperation at all (label from n.Label directly; edges via
+// OutEdges/InEdges, kata cycle 36's own label-agnostic primitives), so DeleteNode cleans both up
+// automatically. Without the label cleanup, AllNodes would return a dangling id for every deleted
+// node; without the edge cleanup - the real, live bug this cycle fixes - any node that still had
+// real edges left a dangling tagEdgeOut/tagEdgeIn key behind, pointing at an id that no longer
+// resolves (found live: deleting nodes connected to a real Entity broke tools/graph-ui's own
+// neighborhood view, which tried to build an edge referencing a node that no longer existed).
 func (g *Graph) DeleteNode(id int64, indexedKeys ...string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -127,6 +132,24 @@ func (g *Graph) DeleteNode(id int64, indexedKeys ...string) error {
 	}
 	if err := g.store.Delete(labelIndexKey(n.Label, id)); err != nil {
 		return fmt.Errorf("delete label index entry: %w", err)
+	}
+	out, err := g.OutEdges(id)
+	if err != nil {
+		return fmt.Errorf("list outgoing edges: %w", err)
+	}
+	for _, e := range out {
+		if err := g.removeEdgeLocked(e.From, e.To, e.Label); err != nil {
+			return fmt.Errorf("remove outgoing edge: %w", err)
+		}
+	}
+	in, err := g.InEdges(id)
+	if err != nil {
+		return fmt.Errorf("list incoming edges: %w", err)
+	}
+	for _, e := range in {
+		if err := g.removeEdgeLocked(e.From, e.To, e.Label); err != nil {
+			return fmt.Errorf("remove incoming edge: %w", err)
+		}
 	}
 	if err := g.store.Delete(nodeKey(id)); err != nil {
 		return fmt.Errorf("delete node %d: %w", id, err)
