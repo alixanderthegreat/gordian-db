@@ -85,6 +85,58 @@ func TestDeindexNodeVector_RemovesVectorNotOtherNodes(t *testing.T) {
 	}
 }
 
+// TestGetNodeVector_RoundTripsExactly proves GetNodeVector (kata cycle 48) hands back exactly the
+// vector IndexNodeVector/AddNodeWithVector stored, unchanged - the real requirement for the
+// upcoming SIMILAR_TO backfill, which needs to recover an already-embedded node's own real vector
+// with no precision loss before running it back through VectorTopK.
+func TestGetNodeVector_RoundTripsExactly(t *testing.T) {
+	g := openTestGraph(t)
+	vecs := genVectors(1)
+	id, err := g.AddNodeWithVector("BookChunk", nil, vecs[0])
+	if err != nil {
+		t.Fatalf("AddNodeWithVector: %v", err)
+	}
+
+	got, found, err := g.GetNodeVector("BookChunk", id)
+	if err != nil {
+		t.Fatalf("GetNodeVector: %v", err)
+	}
+	if !found {
+		t.Fatalf("GetNodeVector found = false, want true")
+	}
+	if len(got) != len(vecs[0]) {
+		t.Fatalf("GetNodeVector len = %d, want %d", len(got), len(vecs[0]))
+	}
+	for i := range got {
+		if got[i] != vecs[0][i] {
+			t.Fatalf("GetNodeVector[%d] = %v, want %v (round trip must be exact)", i, got[i], vecs[0][i])
+		}
+	}
+}
+
+// TestGetNodeVector_NoVectorReturnsOkFalseNotError proves a node with no vector indexed under the
+// given label - either a real node whose vector was never stored, or a plain nonexistent id -
+// reports found=false, not an error, matching GetNode's own established (Node, bool, error) shape.
+func TestGetNodeVector_NoVectorReturnsOkFalseNotError(t *testing.T) {
+	g := openTestGraph(t)
+
+	id, err := g.AddNode("BookChunk", map[string]any{"text": "no vector here"})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+
+	got, found, err := g.GetNodeVector("BookChunk", id)
+	if err != nil {
+		t.Fatalf("GetNodeVector: %v", err)
+	}
+	if found {
+		t.Fatalf("GetNodeVector found = true, want false (node %d has no indexed vector)", id)
+	}
+	if got != nil {
+		t.Fatalf("GetNodeVector vec = %v, want nil when not found", got)
+	}
+}
+
 // TestDeindexNodeFilteredVector_RemovesEntryNotOtherFilterValues mirrors
 // TestDeindexNodeVector_RemovesVectorNotOtherNodes for the compound-filtered case.
 func TestDeindexNodeFilteredVector_RemovesEntryNotOtherFilterValues(t *testing.T) {
