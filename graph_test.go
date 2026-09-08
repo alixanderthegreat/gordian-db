@@ -381,3 +381,79 @@ func TestGraphNeighborsFiltersByLabel(t *testing.T) {
 		t.Fatalf("Neighbors(a, KNOWS) = %+v, want empty - no such edge exists", knows)
 	}
 }
+
+// TestRemoveEdge_RemovesBothDirections proves RemoveEdge (kata cycle 38) removes both the OUT and
+// IN presence keys AddEdge wrote - a real edge, once removed, must be invisible to Neighbors,
+// InNeighbors, and OutEdges/InEdges alike, not just one direction.
+func TestRemoveEdge_RemovesBothDirections(t *testing.T) {
+	g := openTestGraph(t)
+	a, err := g.AddNode("Thing", map[string]any{})
+	if err != nil {
+		t.Fatalf("AddNode a: %v", err)
+	}
+	b, err := g.AddNode("Thing", map[string]any{})
+	if err != nil {
+		t.Fatalf("AddNode b: %v", err)
+	}
+	if err := g.AddEdge(a, b, "LIKES"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+
+	if err := g.RemoveEdge(a, b, "LIKES"); err != nil {
+		t.Fatalf("RemoveEdge: %v", err)
+	}
+
+	out, err := g.Neighbors(a, "LIKES")
+	if err != nil {
+		t.Fatalf("Neighbors: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("Neighbors(a,LIKES) after RemoveEdge = %+v, want empty", out)
+	}
+	in, err := g.InNeighbors(b, "LIKES")
+	if err != nil {
+		t.Fatalf("InNeighbors: %v", err)
+	}
+	if len(in) != 0 {
+		t.Fatalf("InNeighbors(b,LIKES) after RemoveEdge = %+v, want empty", in)
+	}
+}
+
+// TestRemoveEdge_LeavesOtherEdgesIntact proves RemoveEdge removes exactly the targeted edge - a
+// sibling edge (different label, or a different pair entirely) must survive untouched, the same
+// "prove exclusion, not just inclusion" discipline used throughout this project.
+func TestRemoveEdge_LeavesOtherEdgesIntact(t *testing.T) {
+	g := openTestGraph(t)
+	a, _ := g.AddNode("Thing", map[string]any{})
+	b, _ := g.AddNode("Thing", map[string]any{})
+	c, _ := g.AddNode("Thing", map[string]any{})
+	if err := g.AddEdge(a, b, "LIKES"); err != nil {
+		t.Fatalf("AddEdge LIKES: %v", err)
+	}
+	if err := g.AddEdge(a, c, "MENTIONS"); err != nil {
+		t.Fatalf("AddEdge MENTIONS: %v", err)
+	}
+
+	if err := g.RemoveEdge(a, b, "LIKES"); err != nil {
+		t.Fatalf("RemoveEdge: %v", err)
+	}
+
+	survivor, err := g.Neighbors(a, "MENTIONS")
+	if err != nil {
+		t.Fatalf("Neighbors: %v", err)
+	}
+	if len(survivor) != 1 || survivor[0].ID != c {
+		t.Fatalf("Neighbors(a,MENTIONS) after removing a DIFFERENT edge = %+v, want exactly [c=%d]", survivor, c)
+	}
+}
+
+// TestRemoveEdge_NonexistentEdgeIsNoop proves removing an edge that was never added is a real,
+// safe no-op, not an error - the same convention Store.Delete/DeindexNode* already establish.
+func TestRemoveEdge_NonexistentEdgeIsNoop(t *testing.T) {
+	g := openTestGraph(t)
+	a, _ := g.AddNode("Thing", map[string]any{})
+	b, _ := g.AddNode("Thing", map[string]any{})
+	if err := g.RemoveEdge(a, b, "NEVER_ADDED"); err != nil {
+		t.Fatalf("RemoveEdge on a nonexistent edge: %v, want nil (safe no-op)", err)
+	}
+}

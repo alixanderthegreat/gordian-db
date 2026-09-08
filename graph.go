@@ -320,6 +320,36 @@ func (g *Graph) AddEdge(from, to int64, label string) error {
 	return nil
 }
 
+// RemoveEdge removes a real, latent gap found live (kata cycle 38): AddEdge had no inverse at
+// all - a graph that can only ever gain edges, never correct a mistaken one, is a real
+// operational gap for any real caller, not a hypothetical (found via a genuine accidental write
+// against the production store during graph-ui's own real write-path verification). Removes both
+// the OUT and IN presence keys AddEdge wrote; safe to call even if the edge doesn't exist
+// (Store.Delete is a no-op for a missing key, same convention as DeindexNodeVector/Range/etc).
+// Does not require either endpoint to still exist - unlike AddEdge's own existence check, a
+// caller cleaning up after a node deletion shouldn't be blocked by the very deletion it's
+// following up on.
+func (g *Graph) RemoveEdge(from, to int64, label string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.removeEdgeLocked(from, to, label)
+}
+
+// removeEdgeLocked is RemoveEdge's own real body, extracted (kata cycle 43) so DeleteNode can
+// call it directly while already holding g.mu - the same lock-already-held convention
+// getNodeLocked already establishes elsewhere in this file. RemoveEdge itself is NOT reentrant
+// (sync.Mutex isn't), so DeleteNode calling the public RemoveEdge from inside its own locked
+// section would deadlock; this is the fix.
+func (g *Graph) removeEdgeLocked(from, to int64, label string) error {
+	if err := g.store.Delete(edgeOutKey(from, label, to)); err != nil {
+		return fmt.Errorf("delete forward edge: %w", err)
+	}
+	if err := g.store.Delete(edgeInKey(to, label, from)); err != nil {
+		return fmt.Errorf("delete reverse edge: %w", err)
+	}
+	return nil
+}
+
 // Neighbors returns every node reachable from `from` via an outgoing edge labeled `label`.
 func (g *Graph) Neighbors(from int64, label string) ([]Node, error) {
 	var ids []int64
