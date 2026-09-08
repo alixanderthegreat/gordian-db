@@ -78,6 +78,30 @@ func TestAddRangeIndexedNode_DoesNotOrphanNodeOnBadType(t *testing.T) {
 	}
 }
 
+// TestDeindexNodeRange_RemovesEntryNotOtherNodes proves DeindexNodeRange removes exactly the
+// target node's own range entry - a sibling node's range entry under the same parent must
+// survive, and a stale entry never causes RangeScan to error trying to resolve a deleted node.
+func TestDeindexNodeRange_RemovesEntryNotOtherNodes(t *testing.T) {
+	g := openTestGraph(t)
+	target := seedChunk(t, g, 1, 0, "target")
+	survivor := seedChunk(t, g, 1, 1, "survivor")
+
+	if err := g.DeindexNodeRange("Chunk", "book_id", int64(1), "chunk_index", int64(0), target); err != nil {
+		t.Fatalf("DeindexNodeRange: %v", err)
+	}
+	if err := g.DeleteNode(target); err != nil {
+		t.Fatalf("DeleteNode: %v", err)
+	}
+
+	got, err := g.RangeScan("Chunk", "book_id", 1, "chunk_index", 0, 10)
+	if err != nil {
+		t.Fatalf("RangeScan: %v (a dangling range entry would error here)", err)
+	}
+	if len(got) != 1 || got[0].ID != survivor {
+		t.Fatalf("RangeScan after DeindexNodeRange+DeleteNode = %+v, want exactly [survivor=%d]", got, survivor)
+	}
+}
+
 // TestRangeScan_BoundedRange mirrors SurroundingChunks' real shape exactly: chunk_index BETWEEN
 // two bounds, scoped to one book, in ascending order.
 func TestRangeScan_BoundedRange(t *testing.T) {
