@@ -1,0 +1,202 @@
+package gordian
+
+import "testing"
+
+// TestListNodes_PaginatesAcrossMultiplePages proves real, correct ascending-id pagination: seed
+// 5 nodes, page through with limit=2, confirm every node is seen exactly once, in order, with
+// hasMore correctly false only on the last page.
+func TestListNodes_PaginatesAcrossMultiplePages(t *testing.T) {
+	g := openTestGraph(t)
+	var ids []int64
+	for i := 0; i < 5; i++ {
+		id, err := g.AddNode("Thing", map[string]any{"n": i})
+		if err != nil {
+			t.Fatalf("AddNode %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+
+	var seen []int64
+	cursor := int64(-1)
+	for {
+		nodes, next, hasMore, err := g.ListNodes(cursor, 2)
+		if err != nil {
+			t.Fatalf("ListNodes(cursor=%d): %v", cursor, err)
+		}
+		for _, n := range nodes {
+			seen = append(seen, n.ID)
+		}
+		if !hasMore {
+			break
+		}
+		cursor = next
+	}
+
+	if len(seen) != len(ids) {
+		t.Fatalf("ListNodes paginated to %d nodes, want %d", len(seen), len(ids))
+	}
+	for i, id := range ids {
+		if seen[i] != id {
+			t.Fatalf("ListNodes page order[%d] = %d, want %d (ascending id order)", i, seen[i], id)
+		}
+	}
+}
+
+// TestListNodes_FewerThanOnePage proves a store with fewer nodes than the requested limit
+// returns them all with hasMore=false, not an error or a short read.
+func TestListNodes_FewerThanOnePage(t *testing.T) {
+	g := openTestGraph(t)
+	id, err := g.AddNode("Thing", map[string]any{})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+
+	nodes, next, hasMore, err := g.ListNodes(-1, 10)
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].ID != id {
+		t.Fatalf("ListNodes = %+v, want exactly [id=%d]", nodes, id)
+	}
+	if hasMore {
+		t.Fatal("ListNodes hasMore = true, want false (fewer nodes than the page limit)")
+	}
+	if next != id {
+		t.Fatalf("ListNodes nextCursor = %d, want %d", next, id)
+	}
+}
+
+// TestListNodes_IncludesNodeZero proves the real edge case this primitive's own -1 sentinel
+// design exists for: node id 0 is a real, valid id (the first node ever created in a fresh
+// store) and must be included when starting from the beginning, not silently skipped.
+func TestListNodes_IncludesNodeZero(t *testing.T) {
+	g := openTestGraph(t)
+	id, err := g.AddNode("Thing", map[string]any{})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if id != 0 {
+		t.Fatalf("first node id = %d, want 0 (test assumption for this case)", id)
+	}
+
+	nodes, _, _, err := g.ListNodes(-1, 10)
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].ID != 0 {
+		t.Fatalf("ListNodes(-1, 10) = %+v, want to include node id=0", nodes)
+	}
+}
+
+// TestListNodes_EmptyStore proves an empty store returns an empty slice, not an error.
+func TestListNodes_EmptyStore(t *testing.T) {
+	g := openTestGraph(t)
+	nodes, _, hasMore, err := g.ListNodes(-1, 10)
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	if len(nodes) != 0 || hasMore {
+		t.Fatalf("ListNodes(empty store) = %+v hasMore=%v, want empty and false", nodes, hasMore)
+	}
+}
+
+// TestOutEdges_InEdges_MultipleLabels proves the real point of these primitives: a node with
+// edges of MULTIPLE different labels, in both directions, are all found in one call each - the
+// exact real gap Neighbors/InNeighbors (label-required) can't answer.
+func TestOutEdges_InEdges_MultipleLabels(t *testing.T) {
+	g := openTestGraph(t)
+	a, err := g.AddNode("Thing", map[string]any{})
+	if err != nil {
+		t.Fatalf("AddNode a: %v", err)
+	}
+	b, err := g.AddNode("Thing", map[string]any{})
+	if err != nil {
+		t.Fatalf("AddNode b: %v", err)
+	}
+	c, err := g.AddNode("Thing", map[string]any{})
+	if err != nil {
+		t.Fatalf("AddNode c: %v", err)
+	}
+	if err := g.AddEdge(a, b, "LIKES"); err != nil {
+		t.Fatalf("AddEdge LIKES: %v", err)
+	}
+	if err := g.AddEdge(a, c, "MENTIONS"); err != nil {
+		t.Fatalf("AddEdge MENTIONS: %v", err)
+	}
+
+	out, err := g.OutEdges(a)
+	if err != nil {
+		t.Fatalf("OutEdges: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("OutEdges(a) = %+v, want 2 edges (LIKES and MENTIONS)", out)
+	}
+	labels := map[string]bool{}
+	for _, e := range out {
+		labels[e.Label] = true
+		if e.From != a {
+			t.Fatalf("OutEdges(a) edge.From = %d, want %d", e.From, a)
+		}
+	}
+	if !labels["LIKES"] || !labels["MENTIONS"] {
+		t.Fatalf("OutEdges(a) labels = %v, want both LIKES and MENTIONS", labels)
+	}
+
+	inB, err := g.InEdges(b)
+	if err != nil {
+		t.Fatalf("InEdges(b): %v", err)
+	}
+	if len(inB) != 1 || inB[0].From != a || inB[0].Label != "LIKES" {
+		t.Fatalf("InEdges(b) = %+v, want exactly [from=%d label=LIKES]", inB, a)
+	}
+}
+
+// TestOutEdges_NoEdgesReturnsEmpty proves a node with no outgoing edges returns an empty slice,
+// not an error.
+func TestOutEdges_NoEdgesReturnsEmpty(t *testing.T) {
+	g := openTestGraph(t)
+	id, err := g.AddNode("Thing", map[string]any{})
+	if err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	edges, err := g.OutEdges(id)
+	if err != nil {
+		t.Fatalf("OutEdges: %v", err)
+	}
+	if len(edges) != 0 {
+		t.Fatalf("OutEdges(no edges) = %+v, want empty", edges)
+	}
+}
+
+// TestOutEdges_ConsistentWithNeighbors cross-checks OutEdges against the existing, already-proven
+// Neighbors(from,label) for the same real edges - the same "cross-check against an independent
+// implementation" discipline used throughout this project.
+func TestOutEdges_ConsistentWithNeighbors(t *testing.T) {
+	g := openTestGraph(t)
+	a, err := g.AddNode("Thing", map[string]any{})
+	if err != nil {
+		t.Fatalf("AddNode a: %v", err)
+	}
+	b, err := g.AddNode("Thing", map[string]any{})
+	if err != nil {
+		t.Fatalf("AddNode b: %v", err)
+	}
+	if err := g.AddEdge(a, b, "LIKES"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+
+	viaNeighbors, err := g.Neighbors(a, "LIKES")
+	if err != nil {
+		t.Fatalf("Neighbors: %v", err)
+	}
+	viaOutEdges, err := g.OutEdges(a)
+	if err != nil {
+		t.Fatalf("OutEdges: %v", err)
+	}
+	if len(viaNeighbors) != 1 || len(viaOutEdges) != 1 {
+		t.Fatalf("Neighbors=%+v OutEdges=%+v, want exactly 1 each", viaNeighbors, viaOutEdges)
+	}
+	if viaNeighbors[0].ID != viaOutEdges[0].To {
+		t.Fatalf("Neighbors found id=%d, OutEdges found to=%d, want the same real edge", viaNeighbors[0].ID, viaOutEdges[0].To)
+	}
+}
