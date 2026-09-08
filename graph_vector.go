@@ -91,10 +91,22 @@ func (g *Graph) AddNodeWithVector(label string, props map[string]any, vec []floa
 	return id, nil
 }
 
+// ScoredNode pairs a Node with its cosine-similarity score against the query that found it - kata
+// cycle 29's own real fix to VectorTopK/FilteredVectorTopK's original ([]Node, error) signature.
+// Found necessary before any real caller existed: AppendFact's real dedup check compares a
+// similarity score against a threshold, and Entry/ResourceChunk/BookChunk's own real Similarity
+// fields need the actual number, not just rank order - rank alone was never enough for the real
+// callers this primitive exists for.
+type ScoredNode struct {
+	Node
+	Score float64
+}
+
 // vectorTopKScan is VectorTopK/FilteredVectorTopK's shared heap-scan core: scan prefix (values
 // already carrying the vector - no per-candidate Get), score by cosine similarity against query,
-// keep the top k via an O(n log k) min-heap, resolve to full Nodes in descending-score order.
-func (g *Graph) vectorTopKScan(prefix []byte, query []float32, k int) ([]Node, error) {
+// keep the top k via an O(n log k) min-heap, resolve to full ScoredNodes in descending-score
+// order.
+func (g *Graph) vectorTopKScan(prefix []byte, query []float32, k int) ([]ScoredNode, error) {
 	h := &scoredMinHeap{}
 	err := g.store.Scan(prefix, func(key, value []byte) bool {
 		id := binary.BigEndian.Uint64(key[len(key)-8:])
@@ -111,31 +123,46 @@ func (g *Graph) vectorTopKScan(prefix []byte, query []float32, k int) ([]Node, e
 		return nil, err
 	}
 
-	ids := make([]int64, h.Len())
-	for i := len(ids) - 1; i >= 0; i-- {
-		ids[i] = int64(heap.Pop(h).(scoredID).id)
+	ordered := make([]scoredID, h.Len())
+	for i := len(ordered) - 1; i >= 0; i-- {
+		ordered[i] = heap.Pop(h).(scoredID)
 	}
-	return g.resolveNodes(ids)
+
+	ids := make([]int64, len(ordered))
+	for i, s := range ordered {
+		ids[i] = int64(s.id)
+	}
+	nodes, err := g.resolveNodes(ids)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]ScoredNode, len(nodes))
+	for i, n := range nodes {
+		out[i] = ScoredNode{Node: n, Score: ordered[i].score}
+	}
+	return out, nil
 }
 
 // VectorTopK returns the k nodes of label whose vectors are closest to query by cosine
-// similarity, in descending-score order - a brute-force scan of just that label's vectors. This
-// is the real, production home of what cycles 20/25 proved synthetically: brute force, not IVF,
-// resolves categories C and E for real use (see project_gordian-db-compound-filtered-vector-search
-// and project_gordian-db-vector-search-benchmark memory) - IVF's own production integration is a
+// similarity, each paired with its real similarity score, in descending-score order - a
+// brute-force scan of just that label's vectors. This is the real, production home of what
+// cycles 20/25 proved synthetically: brute force, not IVF, resolves categories C and E for real
+// use (see project_gordian-db-compound-filtered-vector-search and
+// project_gordian-db-vector-search-benchmark memory) - IVF's own production integration is a
 // deliberately separate, later addition for whenever a large, UNFILTERED corpus (category D at
 // real scale) actually needs it.
-func (g *Graph) VectorTopK(label string, query []float32, k int) ([]Node, error) {
+func (g *Graph) VectorTopK(label string, query []float32, k int) ([]ScoredNode, error) {
 	return g.vectorTopKScan(vectorPrefix(label), query, k)
 }
 
 // FilteredVectorTopK returns the k nodes of label, restricted to those indexed under
 // (filterKey, filterValue) via IndexNodeFilteredVector, whose vectors are closest to query by
-// cosine similarity - the real, production home of cycle 25's own proven design (a compound
-// equality filter, e.g. simple-bot's real room+sender, narrows the candidate set enough that
-// brute force stays fast regardless of overall corpus size; see
-// project_gordian-db-compound-filtered-vector-search memory for the real numbers). Resolves
-// categories C for real production use, the same way VectorTopK resolves E.
-func (g *Graph) FilteredVectorTopK(label, filterKey, filterValue string, query []float32, k int) ([]Node, error) {
+// cosine similarity, each paired with its real similarity score - the real, production home of
+// cycle 25's own proven design (a compound equality filter, e.g. simple-bot's real room+sender,
+// narrows the candidate set enough that brute force stays fast regardless of overall corpus size;
+// see project_gordian-db-compound-filtered-vector-search memory for the real numbers). Resolves
+// category C for real production use, the same way VectorTopK resolves E.
+func (g *Graph) FilteredVectorTopK(label, filterKey, filterValue string, query []float32, k int) ([]ScoredNode, error) {
 	return g.vectorTopKScan(filteredVectorPrefix(label, filterKey, filterValue), query, k)
 }
