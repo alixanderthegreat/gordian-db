@@ -114,6 +114,12 @@ func (g *Graph) AddNode(label string, props map[string]any) (int64, error) {
 	if err := g.store.Put(nodeKey(id), data); err != nil {
 		return 0, fmt.Errorf("put node: %w", err)
 	}
+	// Label index entry (kata cycle 32) - automatic and mandatory, unlike property/range/vector
+	// indexes: every node always has exactly one label, so AllNodes(label) can stay fast without
+	// requiring any caller to opt in.
+	if err := g.store.Put(labelIndexKey(label, id), []byte{}); err != nil {
+		return 0, fmt.Errorf("put label index entry: %w", err)
+	}
 	return id, nil
 }
 
@@ -155,31 +161,29 @@ func (g *Graph) GetNode(id int64) (Node, bool, error) {
 // prefix itself (tagNode is unexported), so "list every Book/Resource node" - the real shape
 // FindBook, LibrarySubjects, and IncompleteBooks/IncompleteResources all need (a full scan +
 // Go-side filter/comparison, per cycle 21's own "not every query needs an index" finding) - had
-// no way to be expressed at all until this existed. Deliberately a full scan over every label,
-// not just the target one (matching cycle 21 item 4's own documented, accepted inefficiency) -
-// no per-label key layout exists to scan more narrowly, and nothing so far has shown that scan
-// cost actually matters at real scale.
+// no way to be expressed at all until this existed.
+//
+// Kata cycle 32: originally a full scan over every label (matching cycle 21 item 4's own
+// documented, accepted inefficiency, on the assumption scan cost wouldn't matter at real scale).
+// That assumption didn't hold - cycle 31 added synchronous, user-facing AllNodes("Book") callers
+// in simple-bot sharing a store with book_chunks (up to ~436,538 nodes by cycle 31's own
+// estimate), so a full-store scan to find ~2,614 Book nodes became a real latency concern, not a
+// theoretical one. Now backed by graph_label.go's label index - a real, label-scoped prefix scan,
+// cost proportional to |label|, not total store size. Any node written before this change shipped
+// has no label-index entry yet - see BackfillLabelIndex, mandatory before relying on this for a
+// pre-existing store.
 func (g *Graph) AllNodes(label string) ([]Node, error) {
-	var out []Node
-	var decodeErr error
-	err := g.store.Scan([]byte{tagNode}, func(key, value []byte) bool {
-		var n Node
-		if err := json.Unmarshal(value, &n); err != nil {
-			decodeErr = fmt.Errorf("decode node at key %x: %w", key, err)
-			return false
-		}
-		if n.Label == label {
-			out = append(out, n)
-		}
+	var ids []int64
+	err := g.store.Scan(labelIndexPrefix(label), func(key, value []byte) bool {
+		// key = labelIndexPrefix(label) + 8 bytes nodeID
+		id := int64(binary.BigEndian.Uint64(key[len(key)-8:]))
+		ids = append(ids, id)
 		return true
 	})
 	if err != nil {
 		return nil, err
 	}
-	if decodeErr != nil {
-		return nil, decodeErr
-	}
-	return out, nil
+	return g.resolveNodes(ids)
 }
 
 // ErrNodeNotFound is returned by AddEdge when either endpoint doesn't exist, and by UpdateNode

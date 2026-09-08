@@ -100,6 +100,11 @@ func (g *Graph) AddIndexedNode(label string, props map[string]any, indexedKeys .
 // DeleteNode has no other record of which index entries exist, the same caller-must-know-what-
 // was-indexed limitation UpdateNode's own doc comment already established for updates. Returns
 // ErrNodeNotFound if id doesn't exist (does not silently no-op).
+//
+// The label index (kata cycle 32) is the one exception to "caller must know what was indexed" -
+// unlike property/range/vector indexes, DeleteNode already has n.Label from its own
+// getNodeLocked call above, so it cleans that entry up automatically, with no indexedKeys
+// cooperation required. Without this, AllNodes would return a dangling id for every deleted node.
 func (g *Graph) DeleteNode(id int64, indexedKeys ...string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -119,6 +124,9 @@ func (g *Graph) DeleteNode(id int64, indexedKeys ...string) error {
 		if err := g.store.Delete(propIndexKey(n.Label, k, s, id)); err != nil {
 			return fmt.Errorf("delete property index entry: %w", err)
 		}
+	}
+	if err := g.store.Delete(labelIndexKey(n.Label, id)); err != nil {
+		return fmt.Errorf("delete label index entry: %w", err)
 	}
 	if err := g.store.Delete(nodeKey(id)); err != nil {
 		return fmt.Errorf("delete node %d: %w", id, err)
