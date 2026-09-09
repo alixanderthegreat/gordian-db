@@ -1,7 +1,7 @@
 // Trimmed for gordian-db's own small graph-ui (kata cycle 36) - only the 6 real endpoints
 // tools/graph-ui/server.go actually serves. The full goraphdb-ui client (Cypher, indexes,
 // metrics, slow queries, cluster) is deliberately not ported - see server.go's own package doc.
-import type { NodeCursorPage, GNode, NeighborhoodResponse } from '../types'
+import type { NodeCursorPage, GNode, NeighborhoodResponse, CursorNode, GraphVizEdge } from '../types'
 
 const BASE = '/api'
 
@@ -40,4 +40,12 @@ export const api = {
 
   getNodeDegrees: (ids: number[]) =>
     fetchJSON<{ degrees: Record<string, number> }>(`/nodes/degrees?ids=${ids.join(',')}`),
+
+  // kata cycle 54's own two real, generic primitives - see graphui/server.go's own doc comments
+  // for why these are label-generic, not "book map"-specific.
+  getNodesByLabel: (label: string) =>
+    fetchJSON<{ nodes: CursorNode[] }>(`/nodes/by-label?label=${encodeURIComponent(label)}`),
+
+  getNodeEdgesByLabel: (id: number, label: string) =>
+    fetchJSON<{ edges: GraphVizEdge[] }>(`/nodes/${id}/edges?label=${encodeURIComponent(label)}`),
 }

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { ChevronLeft, ChevronRight, Trash2, Search, X, ArrowRight, ArrowLeft } from 'lucide-react'
 import GraphViewer from '../components/GraphViewer'
 import { api } from '../api/client'
@@ -146,6 +147,19 @@ export default function ExplorerPage() {
       // ignore — node might have been deleted
     }
   }, [selectNode])
+
+  // Real deep-link support (kata cycle 54) - BookMapPage's own onNodeClick navigates here with
+  // ?node=<id> so clicking a book in the map opens that exact book's own real neighborhood,
+  // rather than landing on a blank Explorer. Fires once per real id in the URL, not on every
+  // render (the [searchParams] dependency only changes when the URL itself does).
+  const [searchParams] = useSearchParams()
+  useEffect(() => {
+    const raw = searchParams.get('node')
+    if (!raw) return
+    const id = parseInt(raw, 10)
+    if (!isNaN(id)) exploreById(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams])
 
   // Delete a node
   const deleteNode = async (id: number) => {
