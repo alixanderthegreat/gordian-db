@@ -1,7 +1,7 @@
 // Trimmed for gordian-db's own small graph-ui (kata cycle 36) - only the 6 real endpoints
 // tools/graph-ui/server.go actually serves. The full goraphdb-ui client (Cypher, indexes,
 // metrics, slow queries, cluster) is deliberately not ported - see server.go's own package doc.
-import type { NodeCursorPage, GNode, NeighborhoodResponse, CursorNode, GraphVizEdge } from '../types'
+import type { NodeCursorPage, GNode, NeighborhoodResponse, CursorNode, GraphVizEdge, GraphVizNode } from '../types'
 
 const BASE = '/api'
 
@@ -48,4 +48,15 @@ export const api = {
 
   getNodeEdgesByLabel: (id: number, label: string) =>
     fetchJSON<{ edges: GraphVizEdge[] }>(`/nodes/${id}/edges?label=${encodeURIComponent(label)}`),
+
+  // kata cycle 55's own two real, generic primitives - see graphui/server.go's own doc comments.
+  // getNodeEdgeCounts is deliberately cheaper than getNeighborhood: real per-label counts, no
+  // neighbor resolution, so a caller can decide whether a node is safe to fully load BEFORE
+  // paying for it. getNodesBatch resolves a bounded, chosen id set in one call, for rendering
+  // just one label's worth of a high-degree node's own edges without an N+1 fetch pattern.
+  getNodeEdgeCounts: (id: number) =>
+    fetchJSON<{ counts: Record<string, number> }>(`/nodes/${id}/edge-counts`),
+
+  getNodesBatch: (ids: number[]) =>
+    fetchJSON<{ nodes: GraphVizNode[] }>(`/nodes/batch?ids=${ids.join(',')}`),
 }

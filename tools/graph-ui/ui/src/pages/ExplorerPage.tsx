@@ -120,23 +120,62 @@ export default function ExplorerPage() {
     return () => clearTimeout(t)
   }, [loadList, runSearch, stackIdx, query])
 
-  // Select and explore a node
+  // HIGH_DEGREE_THRESHOLD is kata cycle 55's own real line: 310 real edges (a real book, cited in
+  // kata cycle 45's own notes) already renders fine today, so the threshold sits comfortably
+  // above that proven-working case rather than restricting the common path - 1,571 real edges
+  // (node 33175, found live) is what actually broke the Edges panel and the graph view, not
+  // anything close to 310.
+  const HIGH_DEGREE_THRESHOLD = 300
+
+  const [edgeCounts, setEdgeCounts] = useState<Record<string, number>>({})
+  const [needsLabelChoice, setNeedsLabelChoice] = useState(false)
+
+  // loadFullNeighborhood is selectNode's own former real body, unchanged - the common case (a
+  // node under the real threshold) behaves exactly as it always has, no regression.
+  const loadFullNeighborhood = useCallback(async (nodeId: number) => {
+    const hood = await api.getNeighborhood(nodeId)
+    const vizNodes: GraphVizNode[] = [hood.center, ...hood.neighbors]
+    setGraphNodes(vizNodes)
+    setGraphEdges(hood.edges)
+    setEdgeCount(hood.edges.length)
+  }, [])
+
+  // loadFilteredByLabel is kata cycle 55's own real answer for a node OVER the threshold: fetch
+  // just ONE label's worth of real edges (already proven cheap - kata cycle 54), then resolve
+  // just those real neighbor ids (plus the center's own id, for its real label/props) via the new
+  // batch endpoint - never the full, unbounded neighborhood.
+  const loadFilteredByLabel = useCallback(async (node: GNode, label: string) => {
+    const { edges } = await api.getNodeEdgesByLabel(node.id, label)
+    const otherIds = Array.from(new Set(edges.map((e) => (e.from === node.id ? e.to : e.from))))
+    const { nodes: resolved } = await api.getNodesBatch([node.id, ...otherIds])
+    setGraphNodes(resolved)
+    setGraphEdges(edges)
+    setEdgeCount(edges.length)
+    setNeedsLabelChoice(false)
+  }, [])
+
+  // Select and explore a node - checks the real, cheap per-label edge COUNT first (kata cycle 55)
+  // before ever attempting the full, unbounded neighborhood fetch that broke on node 33175's own
+  // 1,571 real edges.
   const selectNode = useCallback(async (node: GNode) => {
     setSelectedNode(node)
+    setNeedsLabelChoice(false)
+    setGraphNodes([])
+    setGraphEdges([])
     try {
-      const hood = await api.getNeighborhood(node.id)
-
-      const vizNodes: GraphVizNode[] = [
-        hood.center,
-        ...hood.neighbors,
-      ]
-      setGraphNodes(vizNodes)
-      setGraphEdges(hood.edges)
-      setEdgeCount(hood.edges.length)
+      const { counts } = await api.getNodeEdgeCounts(node.id)
+      setEdgeCounts(counts)
+      const total = Object.values(counts).reduce((a, b) => a + b, 0)
+      if (total > HIGH_DEGREE_THRESHOLD) {
+        setNeedsLabelChoice(true)
+        setEdgeCount(total)
+        return
+      }
+      await loadFullNeighborhood(node.id)
     } catch (e: any) {
-      console.error('Failed to load neighborhood:', e)
+      console.error('Failed to load node edge counts:', e)
     }
-  }, [])
+  }, [loadFullNeighborhood])
 
   // Explore a node from the graph (click-to-expand)
   const exploreById = useCallback(async (id: number) => {
@@ -344,12 +383,41 @@ export default function ExplorerPage() {
               </div>
             </div>
 
-            {/* Graph + enumerated edge list - kata cycle 46's own real fix: the graph alone is a
+            {/* kata cycle 55's own real fix: a node over HIGH_DEGREE_THRESHOLD (node 33175, found
+                live - 1,571 real edges, a 1.4MB response, both the graph and the Edges panel
+                broke trying to render it) shows its real per-label breakdown instead of
+                attempting the full, unbounded fetch - the user picks ONE label to actually
+                explore, using the same cheap edges?label=X endpoint the Book Map already proved
+                out (kata cycle 54). */}
+            {needsLabelChoice ? (
+              <div className="flex-1 min-h-0 bg-slate-900 border border-slate-800 rounded-xl p-5 overflow-auto">
+                <p className="text-sm text-slate-300 mb-1">
+                  {edgeCount} real edges - too many to render at once.
+                </p>
+                <p className="text-xs text-slate-500 mb-4">
+                  Pick one label to explore its own real edges:
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {Object.entries(edgeCounts)
+                    .sort((a, b) => b[1] - a[1])
+                    .map(([label, count]) => (
+                      <button
+                        key={label}
+                        onClick={() => selectedNode && loadFilteredByLabel(selectedNode, label)}
+                        className="px-3 py-1.5 text-sm rounded-md bg-slate-800 text-slate-200 hover:bg-slate-700 border border-slate-700"
+                      >
+                        {label} <span className="text-slate-500">({count})</span>
+                      </button>
+                    ))}
+                </div>
+              </div>
+            ) : (
+            /* Graph + enumerated edge list - kata cycle 46's own real fix: the graph alone is a
                 poor way to actually READ every edge on a high-degree node (a real 310-edge book
                 is the exact case that motivated this) - a real, scrollable, textual list lets a
                 user see every one, not just what fits visually in the ring. Both share the same
                 real ordering (sortEdges.ts: chunk_index when present, else node id), so the
-                graph ring and this list always agree. */}
+                graph ring and this list always agree. */
             <div className="flex-1 min-h-0 flex gap-4">
               <div className="flex-1 min-w-0">
                 <GraphViewer
@@ -411,6 +479,7 @@ export default function ExplorerPage() {
                 </div>
               </div>
             </div>
+            )}
           </>
         ) : (
           <div className="flex-1 flex items-center justify-center text-slate-600">
