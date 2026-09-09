@@ -132,6 +132,75 @@ func (g *Graph) InEdges(to int64) ([]Edge, error) {
 	return edges, nil
 }
 
+// EdgeCountsByLabel returns how many real edges exist per label across the WHOLE store - kata
+// cycle 57's own real primitive, the "counts before payload" step a whole-graph map view needs to
+// decide what is even safe to fetch (the same discipline cycle 55 established for a single
+// high-degree node, applied globally).
+//
+// Scans the tagEdgeOut prefix ONLY, deliberately: every real edge is written to both indexes by
+// AddEdge, but appears exactly ONCE under tagEdgeOut (from's own perspective), so this needs no
+// deduplication - whereas a scan touching tagEdgeIn as well would double-count every edge.
+// Aggregate-only, so the result stays tiny (one int per real label) no matter how large the store
+// is, which is what makes it safe to call unconditionally.
+func (g *Graph) EdgeCountsByLabel() (map[string]int, error) {
+	counts := map[string]int{}
+	var parseErr error
+	err := g.store.Scan([]byte{tagEdgeOut}, func(key, value []byte) bool {
+		label, _, ok := parseEdgeOutSuffix(key)
+		if !ok {
+			parseErr = fmt.Errorf("malformed OUT edge key %x", key)
+			return false
+		}
+		counts[label]++
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	if parseErr != nil {
+		return nil, parseErr
+	}
+	return counts, nil
+}
+
+// EdgesByLabel returns up to limit real edges carrying label, from anywhere in the store, and
+// reports honestly whether it stopped early (truncated) rather than silently returning a partial
+// answer that looks complete - kata cycle 57.
+//
+// A full tagEdgeOut scan with in-loop filtering is genuinely the only option here, and that is
+// worth stating plainly rather than papering over: the real key layout is
+// tag + from + labelLen + label + to, so label sits AFTER from and cannot be prefix-sought. Making
+// label-scoped edge lookup cheap would require a real new index (a third edge keyspace keyed
+// label-first), which is a deliberate non-goal for a browsing/introspection surface that is
+// invoked explicitly by a human, not on a hot path. limit <= 0 means no cap.
+func (g *Graph) EdgesByLabel(label string, limit int) (edges []Edge, truncated bool, err error) {
+	var parseErr error
+	scanErr := g.store.Scan([]byte{tagEdgeOut}, func(key, value []byte) bool {
+		gotLabel, to, ok := parseEdgeOutSuffix(key)
+		if !ok {
+			parseErr = fmt.Errorf("malformed OUT edge key %x", key)
+			return false
+		}
+		if gotLabel != label {
+			return true
+		}
+		if limit > 0 && len(edges) >= limit {
+			truncated = true
+			return false
+		}
+		from := int64(binary.BigEndian.Uint64(key[1:9]))
+		edges = append(edges, Edge{From: from, To: to, Label: gotLabel})
+		return true
+	})
+	if scanErr != nil {
+		return nil, false, scanErr
+	}
+	if parseErr != nil {
+		return nil, false, parseErr
+	}
+	return edges, truncated, nil
+}
+
 // parseEdgeOutSuffix parses the (label, otherID) suffix shared by both edgeOutKey and edgeInKey's
 // own real layout: 1 tag byte + 8 id bytes + 2 length-prefix bytes + label bytes + 8 id bytes.
 // Named for the OUT case (from's own perspective); InEdges reuses it identically since tagEdgeIn
