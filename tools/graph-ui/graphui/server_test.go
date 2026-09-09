@@ -1,4 +1,4 @@
-package main
+package graphui
 
 import (
 	"encoding/json"
@@ -51,7 +51,7 @@ func TestListNodesCursor_ExactShape(t *testing.T) {
 			t.Fatalf("AddNode: %v", err)
 		}
 	}
-	mux := newMux(s, "")
+	mux := NewMux(s.g, nil)
 
 	w, body := doJSON(t, mux, "GET", "/api/nodes/cursor?limit=10", "")
 	if w.Code != http.StatusOK {
@@ -88,7 +88,7 @@ func TestNeighborhood_MultipleLabelsBothDirections(t *testing.T) {
 	if err := s.g.AddEdge(c, a, "MENTIONS"); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	mux := newMux(s, "")
+	mux := NewMux(s.g, nil)
 
 	w, body := doJSON(t, mux, "GET", "/api/nodes/"+strconv.FormatInt(a, 10)+"/neighborhood", "")
 	if w.Code != http.StatusOK {
@@ -118,7 +118,7 @@ func TestNeighborhood_MultipleLabelsBothDirections(t *testing.T) {
 // TestGetNode_NotFound proves a missing node returns a real 404, not a 200 with empty data.
 func TestGetNode_NotFound(t *testing.T) {
 	s := newTestServer(t)
-	mux := newMux(s, "")
+	mux := NewMux(s.g, nil)
 	w, _ := doJSON(t, mux, "GET", "/api/nodes/999999", "")
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", w.Code)
@@ -131,7 +131,7 @@ func TestCreateEdge_RealWrite(t *testing.T) {
 	s := newTestServer(t)
 	a, _ := s.g.AddNode("Thing", map[string]any{})
 	b, _ := s.g.AddNode("Thing", map[string]any{})
-	mux := newMux(s, "")
+	mux := NewMux(s.g, nil)
 
 	w, _ := doJSON(t, mux, "POST", "/api/edges", `{"from":`+strconv.FormatInt(a, 10)+`,"to":`+strconv.FormatInt(b, 10)+`,"label":"LIKES"}`)
 	if w.Code != http.StatusOK {
@@ -152,7 +152,7 @@ func TestCreateEdge_RealWrite(t *testing.T) {
 func TestDeleteNode_RealDelete(t *testing.T) {
 	s := newTestServer(t)
 	id, _ := s.g.AddNode("Thing", map[string]any{})
-	mux := newMux(s, "")
+	mux := NewMux(s.g, nil)
 
 	w, _ := doJSON(t, mux, "DELETE", "/api/nodes/"+strconv.FormatInt(id, 10), "")
 	if w.Code != http.StatusOK {
@@ -176,7 +176,7 @@ func TestStats_RealNodeCount(t *testing.T) {
 			t.Fatalf("AddNode: %v", err)
 		}
 	}
-	mux := newMux(s, "")
+	mux := NewMux(s.g, nil)
 
 	w, body := doJSON(t, mux, "GET", "/api/stats", "")
 	if w.Code != http.StatusOK {
@@ -192,7 +192,7 @@ func TestStats_RealNodeCount(t *testing.T) {
 func TestSearch_ByExactID(t *testing.T) {
 	s := newTestServer(t)
 	id, _ := s.g.AddNode("Entity", map[string]any{"name": "work"})
-	mux := newMux(s, "")
+	mux := NewMux(s.g, nil)
 
 	w, body := doJSON(t, mux, "GET", "/api/nodes/search?q="+strconv.FormatInt(id, 10), "")
 	if w.Code != http.StatusOK {
@@ -213,7 +213,7 @@ func TestSearch_BySubstring(t *testing.T) {
 	s := newTestServer(t)
 	match, _ := s.g.AddNode("Fact", map[string]any{"text": "The speaker offloads 90% of their WORK onto AI."})
 	s.g.AddNode("Fact", map[string]any{"text": "an unrelated sentence about cooking"})
-	mux := newMux(s, "")
+	mux := NewMux(s.g, nil)
 
 	w, body := doJSON(t, mux, "GET", "/api/nodes/search?q=work", "")
 	if w.Code != http.StatusOK {
@@ -233,7 +233,7 @@ func TestSearch_BySubstring(t *testing.T) {
 func TestSearch_NoMatchReturnsEmpty(t *testing.T) {
 	s := newTestServer(t)
 	s.g.AddNode("Entity", map[string]any{"name": "something"})
-	mux := newMux(s, "")
+	mux := NewMux(s.g, nil)
 
 	w, body := doJSON(t, mux, "GET", "/api/nodes/search?q=nonexistent-term-xyz", "")
 	if w.Code != http.StatusOK {
@@ -254,7 +254,7 @@ func TestSearch_CapsAtLimit(t *testing.T) {
 			t.Fatalf("AddNode: %v", err)
 		}
 	}
-	mux := newMux(s, "")
+	mux := NewMux(s.g, nil)
 
 	w, body := doJSON(t, mux, "GET", "/api/nodes/search?q=shared-term&limit=3", "")
 	if w.Code != http.StatusOK {
@@ -280,7 +280,7 @@ func TestSearch_PaginatesAcrossMultiplePages(t *testing.T) {
 		}
 		ids = append(ids, id)
 	}
-	mux := newMux(s, "")
+	mux := NewMux(s.g, nil)
 
 	var seen []int64
 	cursor := int64(-1)
@@ -314,7 +314,7 @@ func TestSearch_PaginatesAcrossMultiplePages(t *testing.T) {
 func TestSearch_IDLookupSecondPageIsEmpty(t *testing.T) {
 	s := newTestServer(t)
 	id, _ := s.g.AddNode("Entity", map[string]any{"name": "solo"})
-	mux := newMux(s, "")
+	mux := NewMux(s.g, nil)
 
 	w, body := doJSON(t, mux, "GET", "/api/nodes/search?q="+strconv.FormatInt(id, 10)+"&cursor="+strconv.FormatInt(id, 10), "")
 	if w.Code != http.StatusOK {
@@ -390,7 +390,7 @@ func TestNeighborhood_SkipsDanglingEdge(t *testing.T) {
 		t.Fatalf("Put raw dangling edge: %v", err)
 	}
 
-	mux := newMux(s, "")
+	mux := NewMux(s.g, nil)
 	w, body := doJSON(t, mux, "GET", "/api/nodes/"+strconv.FormatInt(a, 10)+"/neighborhood", "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
@@ -421,7 +421,7 @@ func TestNodeDegrees_RealCombinedDegree(t *testing.T) {
 	if err := s.g.AddEdge(c, a, "MENTIONS"); err != nil {
 		t.Fatalf("AddEdge c->a: %v", err)
 	}
-	mux := newMux(s, "")
+	mux := NewMux(s.g, nil)
 
 	w, body := doJSON(t, mux, "GET", fmt.Sprintf("/api/nodes/degrees?ids=%d,%d", a, b), "")
 	if w.Code != http.StatusOK {
@@ -441,7 +441,7 @@ func TestNodeDegrees_RealCombinedDegree(t *testing.T) {
 func TestNodeDegrees_NoEdgesIsZeroNotError(t *testing.T) {
 	s := newTestServer(t)
 	id, _ := s.g.AddNode("Entity", map[string]any{"name": "lonely"})
-	mux := newMux(s, "")
+	mux := NewMux(s.g, nil)
 
 	w, body := doJSON(t, mux, "GET", "/api/nodes/degrees?ids="+strconv.FormatInt(id, 10), "")
 	if w.Code != http.StatusOK {
@@ -457,7 +457,7 @@ func TestNodeDegrees_NoEdgesIsZeroNotError(t *testing.T) {
 // result, not a 400 - matching the existing endpoints' own permissive-on-empty convention.
 func TestNodeDegrees_EmptyParamReturnsEmptyMap(t *testing.T) {
 	s := newTestServer(t)
-	mux := newMux(s, "")
+	mux := NewMux(s.g, nil)
 
 	w, body := doJSON(t, mux, "GET", "/api/nodes/degrees", "")
 	if w.Code != http.StatusOK {

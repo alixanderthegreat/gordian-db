@@ -1,20 +1,25 @@
-// Package main: graph-ui is kata cycle 36's own real answer to "fitting the graph-ui under
-// tools/" - a small, purpose-built HTTP backend for gordian-db's own data, deliberately NOT a
-// port of goraphdb's own graphdb-ui (assets/goraphdb/cmd/graphdb-ui, 1,478-line server.go): that
-// tool exposes Cypher query execution, Raft/cluster management, and generic named indexes/
-// constraints - none of which gordian-db has or wants (no query language, deliberately
-// single-node, typed structural indexes only). This backend covers exactly what the real
-// ExplorerPage.tsx needs: browse nodes, inspect a node's neighborhood (every edge, every label,
-// both directions - the real gap ListNodes/OutEdges/InEdges were built to fill), create an edge,
-// delete a node.
-package main
+// Package graphui is kata cycle 36's own real answer to "fitting the graph-ui under tools/" - a
+// small, purpose-built HTTP backend for gordian-db's own data, deliberately NOT a port of
+// goraphdb's own graphdb-ui (assets/goraphdb/cmd/graphdb-ui, 1,478-line server.go): that tool
+// exposes Cypher query execution, Raft/cluster management, and generic named indexes/constraints -
+// none of which gordian-db has or wants (no query language, deliberately single-node, typed
+// structural indexes only). This backend covers exactly what the real ExplorerPage.tsx needs:
+// browse nodes, inspect a node's neighborhood (every edge, every label, both directions - the real
+// gap ListNodes/OutEdges/InEdges were built to fill), create an edge, delete a node.
+//
+// Promoted from tools/graph-ui's own package main to a real importable package in kata cycle 52 -
+// the real point being that a caller who ALREADY has a *gordian.Graph open (simple-bot's own live
+// process, most concretely) can serve the exact same UI/API directly against it, as a goroutine in
+// its own process, rather than needing a second OS process and gordian.Open's own exclusive lock
+// contention with the first. tools/graph-ui's own main.go remains a thin CLI wrapper for the
+// standalone case (inspecting a store while nothing else has it open).
+package graphui
 
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -428,7 +433,13 @@ func (s *apiServer) handleNodeDegrees(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"degrees": degrees})
 }
 
-func newMux(s *apiServer, uiDir string) *http.ServeMux {
+// NewMux builds the real graph-ui HTTP handler - every /api/ route, plus (if uiFS is non-nil) the
+// built frontend with SPA-router fallback. uiFS works over any real fs.FS - the package's own
+// EmbeddedUI() (kata cycle 52's own real point: no loose directory to keep in sync), or
+// os.DirFS(dir) for local frontend development against fresh, unbuilt files. nil means API-only,
+// matching the tool's own original empty-uiDir behavior.
+func NewMux(g *gordian.Graph, uiFS fs.FS) *http.ServeMux {
+	s := &apiServer{g: g}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/nodes/cursor", s.handleListNodesCursor)
 	mux.HandleFunc("GET /api/nodes/search", s.handleSearch)
@@ -439,28 +450,39 @@ func newMux(s *apiServer, uiDir string) *http.ServeMux {
 	mux.HandleFunc("POST /api/edges", s.handleCreateEdge)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
 
-	if uiDir != "" {
-		fs := http.FileServer(http.Dir(uiDir))
-		mux.Handle("/", spaHandler(uiDir, fs))
+	if uiFS != nil {
+		mux.Handle("/", spaHandler(uiFS))
 	}
 	return mux
 }
 
-// spaHandler serves the built frontend's static files, falling back to index.html for any path
-// that isn't a real file on disk - the standard SPA-router pattern (react-router's own
-// client-side routes like /explorer aren't real files, only index.html + client-side JS routing
-// is).
-func spaHandler(uiDir string, fs http.Handler) http.HandlerFunc {
+// spaHandler serves the built frontend's static files over a real fs.FS, falling back to
+// index.html for any path that isn't a real file - the standard SPA-router pattern (react-router's
+// own client-side routes like /explorer aren't real files, only index.html + client-side JS
+// routing is). Works identically whether uiFS is an embedded build or a real disk directory -
+// kata cycle 52's own real point in moving off a raw uiDir string.
+func spaHandler(uiFS fs.FS) http.HandlerFunc {
+	fileServer := http.FileServer(http.FS(uiFS))
 	return func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			http.NotFound(w, r)
 			return
 		}
-		full := filepath.Join(uiDir, filepath.Clean(r.URL.Path))
-		if info, err := os.Stat(full); err == nil && !info.IsDir() {
-			fs.ServeHTTP(w, r)
+		clean := strings.TrimPrefix(r.URL.Path, "/")
+		if clean == "" {
+			clean = "index.html"
+		}
+		if f, err := uiFS.Open(clean); err == nil {
+			_ = f.Close()
+			fileServer.ServeHTTP(w, r)
 			return
 		}
-		http.ServeFile(w, r, filepath.Join(uiDir, "index.html"))
+		data, err := fs.ReadFile(uiFS, "index.html")
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(data)
 	}
 }
