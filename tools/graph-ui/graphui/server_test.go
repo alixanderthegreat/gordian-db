@@ -468,3 +468,98 @@ func TestNodeDegrees_EmptyParamReturnsEmptyMap(t *testing.T) {
 		t.Fatalf("degrees = %+v, want empty", degrees)
 	}
 }
+
+// TestNodesByLabel_ReturnsOnlyThatLabel proves the real, generic point (kata cycle 54): only
+// nodes of the requested label come back, real nodes of a DIFFERENT label are excluded, using the
+// same AllNodes(label) real primitive the rest of gordian-db already relies on.
+func TestNodesByLabel_ReturnsOnlyThatLabel(t *testing.T) {
+	s := newTestServer(t)
+	bookA, _ := s.g.AddNode("Book", map[string]any{"title": "Book A"})
+	bookB, _ := s.g.AddNode("Book", map[string]any{"title": "Book B"})
+	s.g.AddNode("Entity", map[string]any{"name": "not a book"})
+	mux := NewMux(s.g, nil)
+
+	w, body := doJSON(t, mux, "GET", "/api/nodes/by-label?label=Book", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	nodes := body["nodes"].([]any)
+	if len(nodes) != 2 {
+		t.Fatalf("nodes = %+v, want exactly 2 real Book nodes", nodes)
+	}
+	got := map[int64]bool{}
+	for _, n := range nodes {
+		m := n.(map[string]any)
+		got[int64(m["id"].(float64))] = true
+	}
+	if !got[bookA] || !got[bookB] {
+		t.Fatalf("nodes ids = %v, want exactly [%d,%d]", got, bookA, bookB)
+	}
+}
+
+// TestNodesByLabel_MissingLabelIsBadRequest proves a real, required param - an empty/missing
+// label is a genuine 400, not a silently-empty result that could be mistaken for "no real nodes
+// of that label."
+func TestNodesByLabel_MissingLabelIsBadRequest(t *testing.T) {
+	s := newTestServer(t)
+	mux := NewMux(s.g, nil)
+
+	w, _ := doJSON(t, mux, "GET", "/api/nodes/by-label", "")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+// TestNodeEdgesByLabel_FiltersToRequestedLabelOnly proves the real point (kata cycle 54): a node
+// with edges in MULTIPLE real labels only gets back the ones matching the requested label, in
+// EITHER direction - the exact real need a Book node's own thousands of PART_OF-linked chunks
+// motivated (never resolving/serializing them just to find its far sparser RELATED_TO edges).
+func TestNodeEdgesByLabel_FiltersToRequestedLabelOnly(t *testing.T) {
+	s := newTestServer(t)
+	bookA, _ := s.g.AddNode("Book", map[string]any{"title": "A"})
+	bookB, _ := s.g.AddNode("Book", map[string]any{"title": "B"})
+	chunk, _ := s.g.AddNode("BookChunk", map[string]any{"text": "a chunk"})
+	if err := s.g.AddEdge(bookA, bookB, "RELATED_TO"); err != nil {
+		t.Fatalf("AddEdge RELATED_TO: %v", err)
+	}
+	if err := s.g.AddEdge(chunk, bookA, "PART_OF"); err != nil {
+		t.Fatalf("AddEdge PART_OF: %v", err)
+	}
+	mux := NewMux(s.g, nil)
+
+	w, body := doJSON(t, mux, "GET", "/api/nodes/"+strconv.FormatInt(bookA, 10)+"/edges?label=RELATED_TO", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	edges := body["edges"].([]any)
+	if len(edges) != 1 {
+		t.Fatalf("edges = %+v, want exactly 1 real RELATED_TO edge (PART_OF must be excluded)", edges)
+	}
+	e := edges[0].(map[string]any)
+	if e["label"] != "RELATED_TO" {
+		t.Fatalf("edges[0].label = %v, want RELATED_TO", e["label"])
+	}
+}
+
+// TestNodeEdgesByLabel_IncludesBothDirections proves an edge is found whether bookA is the real
+// "from" or the real "to" side - a caller asking "what is bookA related to" shouldn't have to know
+// or care which direction AddEdge originally happened to be called in.
+func TestNodeEdgesByLabel_IncludesBothDirections(t *testing.T) {
+	s := newTestServer(t)
+	bookA, _ := s.g.AddNode("Book", map[string]any{"title": "A"})
+	bookB, _ := s.g.AddNode("Book", map[string]any{"title": "B"})
+	// Real edge created FROM bookB TO bookA - bookA is the "in" side.
+	if err := s.g.AddEdge(bookB, bookA, "RELATED_TO"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	mux := NewMux(s.g, nil)
+
+	w, body := doJSON(t, mux, "GET", "/api/nodes/"+strconv.FormatInt(bookA, 10)+"/edges?label=RELATED_TO", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	edges := body["edges"].([]any)
+	if len(edges) != 1 {
+		t.Fatalf("edges = %+v, want exactly 1 (found via the IN direction)", edges)
+	}
+}
