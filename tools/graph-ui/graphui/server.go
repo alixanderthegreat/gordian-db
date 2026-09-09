@@ -433,6 +433,72 @@ func (s *apiServer) handleNodeDegrees(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"degrees": degrees})
 }
 
+// handleNodeEdgeCounts is kata cycle 55's own real, GENERIC primitive: a node's own real edge
+// count, GROUPED BY LABEL, without resolving a single neighbor node - found necessary live (node
+// 33175, a real still-ingesting book, hit 1,571 real edges and a 1.4MB neighborhood response that
+// broke both the Edges panel and the graph view). This is deliberately cheaper than
+// handleNodeEdgesByLabel (kata cycle 54): that one still returns full edge data for ONE chosen
+// label; this one returns only real integer counts for EVERY label a node touches, so a caller
+// can decide whether fetching anything more is even a good idea BEFORE paying for it.
+func (s *apiServer) handleNodeEdgeCounts(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := s.g.OutEdges(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	in, err := s.g.InEdges(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	counts := map[string]int{}
+	for _, e := range out {
+		counts[e.Label]++
+	}
+	for _, e := range in {
+		counts[e.Label]++
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"counts": counts})
+}
+
+// handleNodesBatch is kata cycle 55's own real, GENERIC primitive: resolve a caller-chosen,
+// bounded set of real node ids in one call - needed so drilling into just ONE label's worth of a
+// high-degree node's own edges (via handleNodeEdgesByLabel) doesn't turn into a real N+1 pattern,
+// one GetNode call per neighbor, from the frontend. Returns vizNode (carries Label, unlike gnode)
+// since the real caller here is rendering a graph, which needs each node's own type to color it.
+// An id that doesn't resolve (deleted, made up) is silently skipped, not a hard failure of the
+// whole batch - matches this file's own existing permissive-on-bad-input convention (e.g.
+// handleNodeDegrees).
+func (s *apiServer) handleNodesBatch(w http.ResponseWriter, r *http.Request) {
+	idsParam := strings.TrimSpace(r.URL.Query().Get("ids"))
+	nodes := []vizNode{}
+	if idsParam == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"nodes": nodes})
+		return
+	}
+	for _, raw := range strings.Split(idsParam, ",") {
+		id, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+		if err != nil {
+			continue
+		}
+		n, ok, err := s.g.GetNode(id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if !ok {
+			continue
+		}
+		nodes = append(nodes, toVizNode(n))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"nodes": nodes})
+}
+
 // handleNodesByLabel is kata cycle 54's own real, GENERIC primitive (not book-specific despite
 // the real need that motivated it) - "give me every node of one label" via the real, already-fast
 // AllNodes(label) (label-indexed since kata cycle 32), for any label small enough to return in one
@@ -515,9 +581,11 @@ func NewMux(g *gordian.Graph, uiFS fs.FS) *http.ServeMux {
 	mux.HandleFunc("GET /api/nodes/search", s.handleSearch)
 	mux.HandleFunc("GET /api/nodes/degrees", s.handleNodeDegrees)
 	mux.HandleFunc("GET /api/nodes/by-label", s.handleNodesByLabel)
+	mux.HandleFunc("GET /api/nodes/batch", s.handleNodesBatch)
 	mux.HandleFunc("GET /api/nodes/{id}", s.handleGetNode)
 	mux.HandleFunc("GET /api/nodes/{id}/neighborhood", s.handleNeighborhood)
 	mux.HandleFunc("GET /api/nodes/{id}/edges", s.handleNodeEdgesByLabel)
+	mux.HandleFunc("GET /api/nodes/{id}/edge-counts", s.handleNodeEdgeCounts)
 	mux.HandleFunc("DELETE /api/nodes/{id}", s.handleDeleteNode)
 	mux.HandleFunc("POST /api/edges", s.handleCreateEdge)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
