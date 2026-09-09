@@ -200,3 +200,118 @@ func TestOutEdges_ConsistentWithNeighbors(t *testing.T) {
 		t.Fatalf("Neighbors found id=%d, OutEdges found to=%d, want the same real edge", viaNeighbors[0].ID, viaOutEdges[0].To)
 	}
 }
+
+// TestEdgeCountsByLabel_CountsEveryRealEdgeExactlyOnce proves kata cycle 57's own real design
+// point: scanning tagEdgeOut alone counts each real edge exactly once. AddEdge writes BOTH edge
+// indexes, so a scan that also touched tagEdgeIn would double every count - this test would catch
+// that regression immediately, since the expected numbers are exact, not approximate.
+func TestEdgeCountsByLabel_CountsEveryRealEdgeExactlyOnce(t *testing.T) {
+	g := openTestGraph(t)
+	a, _ := g.AddNode("Job", nil)
+	b, _ := g.AddNode("Employer", nil)
+	c, _ := g.AddNode("Keyword", nil)
+	d, _ := g.AddNode("Keyword", nil)
+	for _, e := range []struct {
+		from, to int64
+		label    string
+	}{
+		{a, b, "POSTED_BY"},
+		{a, c, "HAS_KEYWORD"},
+		{a, d, "HAS_KEYWORD"},
+	} {
+		if err := g.AddEdge(e.from, e.to, e.label); err != nil {
+			t.Fatalf("AddEdge %s: %v", e.label, err)
+		}
+	}
+
+	counts, err := g.EdgeCountsByLabel()
+	if err != nil {
+		t.Fatalf("EdgeCountsByLabel: %v", err)
+	}
+	if len(counts) != 2 {
+		t.Fatalf("counts = %+v, want exactly 2 real labels", counts)
+	}
+	if counts["POSTED_BY"] != 1 {
+		t.Fatalf("counts[POSTED_BY] = %d, want exactly 1 (2 would mean tagEdgeIn is being double-counted)", counts["POSTED_BY"])
+	}
+	if counts["HAS_KEYWORD"] != 2 {
+		t.Fatalf("counts[HAS_KEYWORD] = %d, want exactly 2", counts["HAS_KEYWORD"])
+	}
+}
+
+// TestEdgeCountsByLabel_EmptyStoreIsEmptyMap proves a real store with no edges at all returns an
+// empty map, not an error and not a nil that a caller has to special-case.
+func TestEdgeCountsByLabel_EmptyStoreIsEmptyMap(t *testing.T) {
+	g := openTestGraph(t)
+	if _, err := g.AddNode("Lonely", nil); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	counts, err := g.EdgeCountsByLabel()
+	if err != nil {
+		t.Fatalf("EdgeCountsByLabel: %v", err)
+	}
+	if len(counts) != 0 {
+		t.Fatalf("counts = %+v, want empty", counts)
+	}
+}
+
+// TestEdgesByLabel_ReturnsOnlyThatLabelWithRealEndpoints proves the filter really filters, and
+// that BOTH endpoints come back correctly - From is parsed from the key's own id bytes rather
+// than inherited from a caller-supplied node (the real difference between this global scan and
+// OutEdges' own per-node one).
+func TestEdgesByLabel_ReturnsOnlyThatLabelWithRealEndpoints(t *testing.T) {
+	g := openTestGraph(t)
+	job, _ := g.AddNode("Job", nil)
+	emp, _ := g.AddNode("Employer", nil)
+	kw, _ := g.AddNode("Keyword", nil)
+	if err := g.AddEdge(job, emp, "POSTED_BY"); err != nil {
+		t.Fatalf("AddEdge POSTED_BY: %v", err)
+	}
+	if err := g.AddEdge(job, kw, "HAS_KEYWORD"); err != nil {
+		t.Fatalf("AddEdge HAS_KEYWORD: %v", err)
+	}
+
+	edges, truncated, err := g.EdgesByLabel("POSTED_BY", 0)
+	if err != nil {
+		t.Fatalf("EdgesByLabel: %v", err)
+	}
+	if truncated {
+		t.Fatalf("truncated = true, want false (no limit given)")
+	}
+	if len(edges) != 1 {
+		t.Fatalf("edges = %+v, want exactly 1 (HAS_KEYWORD must be excluded)", edges)
+	}
+	if edges[0].From != job || edges[0].To != emp || edges[0].Label != "POSTED_BY" {
+		t.Fatalf("edges[0] = %+v, want from=%d to=%d label=POSTED_BY", edges[0], job, emp)
+	}
+}
+
+// TestEdgesByLabel_ReportsTruncationHonestly proves a real limit stops the scan AND says so -
+// a partial answer that looked complete would be worse than no answer at all for a map view
+// deciding what it can render.
+func TestEdgesByLabel_ReportsTruncationHonestly(t *testing.T) {
+	g := openTestGraph(t)
+	job, _ := g.AddNode("Job", nil)
+	for i := 0; i < 5; i++ {
+		kw, _ := g.AddNode("Keyword", map[string]any{"i": i})
+		if err := g.AddEdge(job, kw, "HAS_KEYWORD"); err != nil {
+			t.Fatalf("AddEdge %d: %v", i, err)
+		}
+	}
+
+	edges, truncated, err := g.EdgesByLabel("HAS_KEYWORD", 3)
+	if err != nil {
+		t.Fatalf("EdgesByLabel: %v", err)
+	}
+	if len(edges) != 3 || !truncated {
+		t.Fatalf("got %d edges truncated=%v, want exactly 3 and truncated=true", len(edges), truncated)
+	}
+
+	all, truncated, err := g.EdgesByLabel("HAS_KEYWORD", 5)
+	if err != nil {
+		t.Fatalf("EdgesByLabel (exact limit): %v", err)
+	}
+	if len(all) != 5 || truncated {
+		t.Fatalf("got %d edges truncated=%v, want exactly 5 and truncated=false (limit met exactly, nothing left behind)", len(all), truncated)
+	}
+}
