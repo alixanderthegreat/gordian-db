@@ -1,7 +1,7 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
 import Layout from './components/Layout'
 import ExplorerPage from './pages/ExplorerPage'
-import BookMapPage from './pages/BookMapPage'
+import MapPage from './pages/MapPage'
 
 export default function App() {
   return (
@@ -9,7 +9,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Navigate to="/explorer" replace />} />
         <Route path="/explorer" element={<ExplorerPage />} />
-        <Route path="/books" element={<BookMapPage />} />
+        <Route path="/map" element={<MapPage />} />
       </Routes>
     </Layout>
   )

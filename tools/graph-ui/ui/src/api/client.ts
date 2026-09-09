@@ -59,4 +59,14 @@ export const api = {
 
   getNodesBatch: (ids: number[]) =>
     fetchJSON<{ nodes: GraphVizNode[] }>(`/nodes/batch?ids=${ids.join(',')}`),
+
+  // kata cycle 57's own two GLOBAL edge primitives, for the whole-graph map. getEdgeCounts is the
+  // "price the work before doing it" call the map makes first; getEdgesByLabel reports truncation
+  // honestly so the map can say "first N of more" rather than implying it showed everything.
+  getEdgeCounts: () => fetchJSON<{ counts: Record<string, number> }>('/edges/counts'),
+
+  getEdgesByLabel: (label: string, limit = 5000) =>
+    fetchJSON<{ edges: GraphVizEdge[]; truncated: boolean }>(
+      `/edges?label=${encodeURIComponent(label)}&limit=${limit}`,
+    ),
 }

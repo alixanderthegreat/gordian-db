@@ -433,6 +433,48 @@ func (s *apiServer) handleNodeDegrees(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"degrees": degrees})
 }
 
+// handleEdgeCounts is kata cycle 57's own real GLOBAL counterpart to handleNodeEdgeCounts: how
+// many real edges exist per label across the WHOLE graph, aggregate-only. This is what a
+// whole-graph map view fetches FIRST, before any payload - the same "price the work before doing
+// it" discipline cycle 55 established for one high-degree node, applied to the entire store.
+func (s *apiServer) handleEdgeCounts(w http.ResponseWriter, r *http.Request) {
+	counts, err := s.g.EdgeCountsByLabel()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"counts": counts})
+}
+
+// handleEdgesByLabel is kata cycle 57's own real GLOBAL edge query: every real edge carrying one
+// label, from anywhere in the graph, capped by a real limit that reports truncation honestly
+// rather than handing back a partial answer that looks whole. The label determines its own
+// endpoints, which is exactly why an EDGE label (not a node label) is the right control for a map
+// view over a heterogeneous graph.
+func (s *apiServer) handleEdgesByLabel(w http.ResponseWriter, r *http.Request) {
+	label := strings.TrimSpace(r.URL.Query().Get("label"))
+	if label == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("label is required"))
+		return
+	}
+	limit := 5000
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 {
+			limit = v
+		}
+	}
+	found, truncated, err := s.g.EdgesByLabel(label, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	edges := make([]vizEdge, len(found))
+	for i, e := range found {
+		edges[i] = vizEdge{ID: int64(i), From: e.From, To: e.To, Label: e.Label}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"edges": edges, "truncated": truncated})
+}
+
 // handleNodeEdgeCounts is kata cycle 55's own real, GENERIC primitive: a node's own real edge
 // count, GROUPED BY LABEL, without resolving a single neighbor node - found necessary live (node
 // 33175, a real still-ingesting book, hit 1,571 real edges and a 1.4MB neighborhood response that
@@ -587,6 +629,8 @@ func NewMux(g *gordian.Graph, uiFS fs.FS) *http.ServeMux {
 	mux.HandleFunc("GET /api/nodes/{id}/edges", s.handleNodeEdgesByLabel)
 	mux.HandleFunc("GET /api/nodes/{id}/edge-counts", s.handleNodeEdgeCounts)
 	mux.HandleFunc("DELETE /api/nodes/{id}", s.handleDeleteNode)
+	mux.HandleFunc("GET /api/edges/counts", s.handleEdgeCounts)
+	mux.HandleFunc("GET /api/edges", s.handleEdgesByLabel)
 	mux.HandleFunc("POST /api/edges", s.handleCreateEdge)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
 

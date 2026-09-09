@@ -3,10 +3,17 @@ import cytoscape from 'cytoscape'
 import type { GraphVizNode, GraphVizEdge } from '../types'
 import { nodeDisplayLabel } from '../lib/label'
 
+// LayoutMode is kata cycle 57's own real addition: 'concentric' assumes exactly one real center
+// node to ring everything around, which is correct for a neighborhood view and meaningless for a
+// whole-graph map that has no center at all. 'force' ('cose') is the real layout for that case.
+// Defaults to 'concentric' so every pre-existing caller is unchanged.
+export type LayoutMode = 'concentric' | 'force'
+
 interface Props {
   nodes: GraphVizNode[]
   edges: GraphVizEdge[]
   centerId?: number
+  layout?: LayoutMode
   onNodeClick?: (nodeId: number) => void
 }
 
@@ -54,7 +61,7 @@ function sizeFor(degree: number): number {
   return Math.min(80, Math.max(24, size))
 }
 
-export default function GraphViewer({ nodes, edges, centerId, onNodeClick }: Props) {
+export default function GraphViewer({ nodes, edges, centerId, layout = 'concentric', onNodeClick }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const cyRef = useRef<cytoscape.Core | null>(null)
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null)
@@ -115,21 +122,37 @@ export default function GraphViewer({ nodes, edges, centerId, onNodeClick }: Pro
     // split entirely: every real call into this component always has exactly one real center
     // (ExplorerPage's own neighborhood view), so a layout built around that shape is the right
     // default regardless of size, not just a fallback for huge neighborhoods.
+    // Real layout selection (kata cycle 57). 'force' is for a whole-graph map, which has no
+    // center to ring around - animation is off there deliberately, since animating a real
+    // multi-thousand-node force simulation is where a map view actually becomes unusable.
+    const layoutOptions =
+      layout === 'force'
+        ? ({
+            name: 'cose',
+            animate: false,
+            nodeRepulsion: 8000,
+            idealEdgeLength: 60,
+            nestingFactor: 0.1,
+            gravity: 0.25,
+            numIter: 1000,
+          } as any)
+        : ({
+            name: 'concentric',
+            concentric: (node: cytoscape.NodeSingular) => (node.data('isCenter') ? 2 : 1),
+            levelWidth: () => 1,
+            // Real ordering within the ring (kata cycle 46) - without an explicit sort, cytoscape's
+            // own within-level node placement isn't a guarantee worth relying on. sortKey (built
+            // above) is chunk_index when present, else the node's own id.
+            sort: (a: cytoscape.NodeSingular, b: cytoscape.NodeSingular) => a.data('sortKey') - b.data('sortKey'),
+            minNodeSpacing: 45,
+            animate: true,
+            animationDuration: 400,
+          } as any)
+
     const cy = cytoscape({
       container: containerRef.current,
       elements,
-      layout: {
-        name: 'concentric',
-        concentric: (node: cytoscape.NodeSingular) => (node.data('isCenter') ? 2 : 1),
-        levelWidth: () => 1,
-        // Real ordering within the ring (kata cycle 46) - without an explicit sort, cytoscape's
-        // own within-level node placement isn't a guarantee worth relying on. sortKey (built
-        // above) is chunk_index when present, else the node's own id.
-        sort: (a: cytoscape.NodeSingular, b: cytoscape.NodeSingular) => a.data('sortKey') - b.data('sortKey'),
-        minNodeSpacing: 45,
-        animate: true,
-        animationDuration: 400,
-      } as any,
+      layout: layoutOptions,
       style: [
         {
           selector: 'node',
@@ -206,7 +229,7 @@ export default function GraphViewer({ nodes, edges, centerId, onNodeClick }: Pro
       cy.destroy()
       cyRef.current = null
     }
-  }, [buildElements, onNodeClick])
+  }, [buildElements, onNodeClick, layout])
 
   if (nodes.length === 0) {
     return (

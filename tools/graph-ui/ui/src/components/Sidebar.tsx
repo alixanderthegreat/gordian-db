@@ -1,9 +1,9 @@
 import { NavLink } from 'react-router-dom'
-import { Search, Activity, BookOpen } from 'lucide-react'
+import { Search, Activity, Network } from 'lucide-react'
 
 const links = [
   { to: '/explorer', icon: Search, label: 'Explorer' },
-  { to: '/books', icon: BookOpen, label: 'Book Map' },
+  { to: '/map', icon: Network, label: 'Map' },
 ]
 
 export default function Sidebar() {

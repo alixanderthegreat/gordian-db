@@ -187,7 +187,7 @@ export default function ExplorerPage() {
     }
   }, [selectNode])
 
-  // Real deep-link support (kata cycle 54) - BookMapPage's own onNodeClick navigates here with
+  // Real deep-link support (kata cycle 54) - MapPage's own onNodeClick navigates here with
   // ?node=<id> so clicking a book in the map opens that exact book's own real neighborhood,
   // rather than landing on a blank Explorer. Fires once per real id in the URL, not on every
   // render (the [searchParams] dependency only changes when the URL itself does).

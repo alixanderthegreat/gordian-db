@@ -659,3 +659,98 @@ func TestNodesBatch_SkipsNonexistentIdsWithoutFailing(t *testing.T) {
 		t.Fatalf("nodes = %+v, want exactly 1 (the nonexistent id skipped, not errored)", nodes)
 	}
 }
+
+// TestEdgeCounts_GlobalPerLabel proves kata cycle 57's own global counts endpoint - the "price
+// the work first" call a whole-graph map makes before fetching any payload. Counts are exact, so
+// a regression that double-counted (by also scanning tagEdgeIn) would fail here loudly.
+func TestEdgeCounts_GlobalPerLabel(t *testing.T) {
+	s := newTestServer(t)
+	job, _ := s.g.AddNode("JobListing", nil)
+	emp, _ := s.g.AddNode("Employer", nil)
+	kw1, _ := s.g.AddNode("Keyword", nil)
+	kw2, _ := s.g.AddNode("Keyword", nil)
+	for _, e := range []struct {
+		f, t2 int64
+		l     string
+	}{{job, emp, "POSTED_BY"}, {job, kw1, "HAS_KEYWORD"}, {job, kw2, "HAS_KEYWORD"}} {
+		if err := s.g.AddEdge(e.f, e.t2, e.l); err != nil {
+			t.Fatalf("AddEdge %s: %v", e.l, err)
+		}
+	}
+	mux := NewMux(s.g, nil)
+
+	w, body := doJSON(t, mux, "GET", "/api/edges/counts", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	counts := body["counts"].(map[string]any)
+	if int(counts["POSTED_BY"].(float64)) != 1 || int(counts["HAS_KEYWORD"].(float64)) != 2 {
+		t.Fatalf("counts = %+v, want POSTED_BY=1 HAS_KEYWORD=2", counts)
+	}
+}
+
+// TestEdgesByLabel_GlobalReturnsOnlyThatLabel proves the global edge query filters to one real
+// label and carries both real endpoints - the whole basis for an edge-label-driven map view.
+func TestEdgesByLabel_GlobalReturnsOnlyThatLabel(t *testing.T) {
+	s := newTestServer(t)
+	job, _ := s.g.AddNode("JobListing", nil)
+	emp, _ := s.g.AddNode("Employer", nil)
+	kw, _ := s.g.AddNode("Keyword", nil)
+	if err := s.g.AddEdge(job, emp, "POSTED_BY"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := s.g.AddEdge(job, kw, "HAS_KEYWORD"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	mux := NewMux(s.g, nil)
+
+	w, body := doJSON(t, mux, "GET", "/api/edges?label=POSTED_BY", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	edges := body["edges"].([]any)
+	if len(edges) != 1 {
+		t.Fatalf("edges = %+v, want exactly 1 real POSTED_BY edge", edges)
+	}
+	e := edges[0].(map[string]any)
+	if int64(e["from"].(float64)) != job || int64(e["to"].(float64)) != emp {
+		t.Fatalf("edges[0] = %+v, want from=%d to=%d", e, job, emp)
+	}
+	if body["truncated"].(bool) {
+		t.Fatalf("truncated = true, want false")
+	}
+}
+
+// TestEdgesByLabel_GlobalReportsTruncation proves a real limit is honestly reported - a map view
+// must be able to tell "this is everything" from "this is the first N of more".
+func TestEdgesByLabel_GlobalReportsTruncation(t *testing.T) {
+	s := newTestServer(t)
+	job, _ := s.g.AddNode("JobListing", nil)
+	for i := 0; i < 4; i++ {
+		kw, _ := s.g.AddNode("Keyword", map[string]any{"i": i})
+		if err := s.g.AddEdge(job, kw, "HAS_KEYWORD"); err != nil {
+			t.Fatalf("AddEdge %d: %v", i, err)
+		}
+	}
+	mux := NewMux(s.g, nil)
+
+	w, body := doJSON(t, mux, "GET", "/api/edges?label=HAS_KEYWORD&limit=2", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if len(body["edges"].([]any)) != 2 || !body["truncated"].(bool) {
+		t.Fatalf("edges=%v truncated=%v, want 2 edges and truncated=true", len(body["edges"].([]any)), body["truncated"])
+	}
+}
+
+// TestEdgesByLabel_GlobalMissingLabelIsBadRequest proves the label really is required - an empty
+// result could otherwise be misread as "no real edges of that label exist".
+func TestEdgesByLabel_GlobalMissingLabelIsBadRequest(t *testing.T) {
+	s := newTestServer(t)
+	mux := NewMux(s.g, nil)
+
+	w, _ := doJSON(t, mux, "GET", "/api/edges", "")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
