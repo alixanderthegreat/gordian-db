@@ -563,3 +563,99 @@ func TestNodeEdgesByLabel_IncludesBothDirections(t *testing.T) {
 		t.Fatalf("edges = %+v, want exactly 1 (found via the IN direction)", edges)
 	}
 }
+
+// TestNodeEdgeCounts_GroupsByLabelWithoutResolvingNeighbors proves kata cycle 55's own real
+// point: a node's own real edges are grouped by label into real counts, both directions, without
+// needing to resolve a single neighbor - the exact real primitive a high-degree node (a real book
+// with 1000+ real chunks) needs before a caller decides whether fetching anything more is safe.
+func TestNodeEdgeCounts_GroupsByLabelWithoutResolvingNeighbors(t *testing.T) {
+	s := newTestServer(t)
+	book, _ := s.g.AddNode("Book", map[string]any{"title": "A"})
+	otherBook, _ := s.g.AddNode("Book", map[string]any{"title": "B"})
+	chunk1, _ := s.g.AddNode("BookChunk", map[string]any{})
+	chunk2, _ := s.g.AddNode("BookChunk", map[string]any{})
+	if err := s.g.AddEdge(chunk1, book, "PART_OF"); err != nil {
+		t.Fatalf("AddEdge chunk1: %v", err)
+	}
+	if err := s.g.AddEdge(chunk2, book, "PART_OF"); err != nil {
+		t.Fatalf("AddEdge chunk2: %v", err)
+	}
+	if err := s.g.AddEdge(book, otherBook, "RELATED_TO"); err != nil {
+		t.Fatalf("AddEdge RELATED_TO: %v", err)
+	}
+	mux := NewMux(s.g, nil)
+
+	w, body := doJSON(t, mux, "GET", "/api/nodes/"+strconv.FormatInt(book, 10)+"/edge-counts", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	counts := body["counts"].(map[string]any)
+	if int(counts["PART_OF"].(float64)) != 2 {
+		t.Fatalf("counts[PART_OF] = %v, want 2", counts["PART_OF"])
+	}
+	if int(counts["RELATED_TO"].(float64)) != 1 {
+		t.Fatalf("counts[RELATED_TO] = %v, want 1", counts["RELATED_TO"])
+	}
+}
+
+// TestNodeEdgeCounts_NoEdgesIsEmptyMap proves a real node with no edges at all gets a real,
+// empty counts map, not an error.
+func TestNodeEdgeCounts_NoEdgesIsEmptyMap(t *testing.T) {
+	s := newTestServer(t)
+	id, _ := s.g.AddNode("Entity", map[string]any{"name": "lonely"})
+	mux := NewMux(s.g, nil)
+
+	w, body := doJSON(t, mux, "GET", "/api/nodes/"+strconv.FormatInt(id, 10)+"/edge-counts", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	counts := body["counts"].(map[string]any)
+	if len(counts) != 0 {
+		t.Fatalf("counts = %+v, want empty", counts)
+	}
+}
+
+// TestNodesBatch_ResolvesExactlyTheRequestedRealIds proves the real batch resolution: every real
+// requested id comes back, with its own real label and props - the exact shape GraphViewer needs
+// to render a filtered, bounded set of neighbors without an N+1 per-neighbor fetch.
+func TestNodesBatch_ResolvesExactlyTheRequestedRealIds(t *testing.T) {
+	s := newTestServer(t)
+	a, _ := s.g.AddNode("Book", map[string]any{"title": "A"})
+	b, _ := s.g.AddNode("Entity", map[string]any{"name": "B"})
+	mux := NewMux(s.g, nil)
+
+	w, body := doJSON(t, mux, "GET", "/api/nodes/batch?ids="+strconv.FormatInt(a, 10)+","+strconv.FormatInt(b, 10), "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	nodes := body["nodes"].([]any)
+	if len(nodes) != 2 {
+		t.Fatalf("nodes = %+v, want exactly 2", nodes)
+	}
+	got := map[int64]string{}
+	for _, n := range nodes {
+		m := n.(map[string]any)
+		got[int64(m["id"].(float64))] = m["label"].(string)
+	}
+	if got[a] != "Book" || got[b] != "Entity" {
+		t.Fatalf("got = %v, want id=%d label=Book and id=%d label=Entity", got, a, b)
+	}
+}
+
+// TestNodesBatch_SkipsNonexistentIdsWithoutFailing proves a real, made-up id among otherwise-real
+// ones doesn't fail the whole batch - the same permissive-on-bad-input convention every other
+// endpoint in this file already uses.
+func TestNodesBatch_SkipsNonexistentIdsWithoutFailing(t *testing.T) {
+	s := newTestServer(t)
+	real, _ := s.g.AddNode("Entity", map[string]any{"name": "real"})
+	mux := NewMux(s.g, nil)
+
+	w, body := doJSON(t, mux, "GET", "/api/nodes/batch?ids="+strconv.FormatInt(real, 10)+",999999", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	nodes := body["nodes"].([]any)
+	if len(nodes) != 1 {
+		t.Fatalf("nodes = %+v, want exactly 1 (the nonexistent id skipped, not errored)", nodes)
+	}
+}
