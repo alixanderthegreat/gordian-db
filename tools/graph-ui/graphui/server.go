@@ -433,6 +433,76 @@ func (s *apiServer) handleNodeDegrees(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"degrees": degrees})
 }
 
+// handleNodesByLabel is kata cycle 54's own real, GENERIC primitive (not book-specific despite
+// the real need that motivated it) - "give me every node of one label" via the real, already-fast
+// AllNodes(label) (label-indexed since kata cycle 32), for any label small enough to return in one
+// response (a real caller's own judgment call - e.g. Book, not BookChunk). No cursor pagination:
+// unlike /api/nodes/cursor's own label-agnostic scan, a caller who already knows they want exactly
+// one, typically-small label doesn't need one.
+func (s *apiServer) handleNodesByLabel(w http.ResponseWriter, r *http.Request) {
+	label := strings.TrimSpace(r.URL.Query().Get("label"))
+	if label == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("label is required"))
+		return
+	}
+	nodes, err := s.g.AllNodes(label)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := make([]cursorNode, len(nodes))
+	for i, n := range nodes {
+		out[i] = cursorNode{ID: n.ID, Labels: []string{n.Label}, Props: n.Props}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"nodes": out})
+}
+
+// handleNodeEdgesByLabel is kata cycle 54's own real, GENERIC primitive: a node's own real edges
+// (both directions), filtered server-side to ONE requested label - found necessary because the
+// existing, fully generic handleNeighborhood resolves EVERY edge a node has, which is exactly
+// wrong for a node like a Book with thousands of real PART_OF-linked chunks when a caller only
+// wants its (typically far sparser) RELATED_TO edges. Filtering happens after the real
+// OutEdges/InEdges scan (a cheap, unresolved key scan - no per-edge Node lookup) but before any
+// JSON is built, so a node with thousands of edges in OTHER labels never gets serialized over the
+// wire just to be discarded client-side.
+func (s *apiServer) handleNodeEdgesByLabel(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	label := strings.TrimSpace(r.URL.Query().Get("label"))
+	if label == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("label is required"))
+		return
+	}
+	out, err := s.g.OutEdges(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	in, err := s.g.InEdges(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	edges := []vizEdge{}
+	var edgeID int64
+	for _, e := range out {
+		if e.Label == label {
+			edges = append(edges, vizEdge{ID: edgeID, From: e.From, To: e.To, Label: e.Label})
+			edgeID++
+		}
+	}
+	for _, e := range in {
+		if e.Label == label {
+			edges = append(edges, vizEdge{ID: edgeID, From: e.From, To: e.To, Label: e.Label})
+			edgeID++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"edges": edges})
+}
+
 // NewMux builds the real graph-ui HTTP handler - every /api/ route, plus (if uiFS is non-nil) the
 // built frontend with SPA-router fallback. uiFS works over any real fs.FS - the package's own
 // EmbeddedUI() (kata cycle 52's own real point: no loose directory to keep in sync), or
@@ -444,8 +514,10 @@ func NewMux(g *gordian.Graph, uiFS fs.FS) *http.ServeMux {
 	mux.HandleFunc("GET /api/nodes/cursor", s.handleListNodesCursor)
 	mux.HandleFunc("GET /api/nodes/search", s.handleSearch)
 	mux.HandleFunc("GET /api/nodes/degrees", s.handleNodeDegrees)
+	mux.HandleFunc("GET /api/nodes/by-label", s.handleNodesByLabel)
 	mux.HandleFunc("GET /api/nodes/{id}", s.handleGetNode)
 	mux.HandleFunc("GET /api/nodes/{id}/neighborhood", s.handleNeighborhood)
+	mux.HandleFunc("GET /api/nodes/{id}/edges", s.handleNodeEdgesByLabel)
 	mux.HandleFunc("DELETE /api/nodes/{id}", s.handleDeleteNode)
 	mux.HandleFunc("POST /api/edges", s.handleCreateEdge)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
