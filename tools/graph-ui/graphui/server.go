@@ -80,6 +80,32 @@ func toVizNode(n gordian.Node) vizNode {
 	return vizNode{ID: n.ID, Props: n.Props, Label: n.Label}
 }
 
+// truncateProps caps every string prop value at max runes, leaving every other type and every prop
+// KEY untouched - kata cycle 58's own real payload fix. Rune-based, not byte-based, so a cap never
+// splits a multi-byte character into invalid UTF-8 (this corpus contains real non-ASCII text).
+// Returns a new map rather than mutating the node's own props, since the caller's map came
+// straight from a real decoded Node and must not be corrupted for anything else holding it.
+func truncateProps(props map[string]any, max int) map[string]any {
+	if props == nil {
+		return nil
+	}
+	out := make(map[string]any, len(props))
+	for k, v := range props {
+		s, ok := v.(string)
+		if !ok {
+			out[k] = v
+			continue
+		}
+		r := []rune(s)
+		if len(r) > max {
+			out[k] = string(r[:max]) + "…"
+			continue
+		}
+		out[k] = s
+	}
+	return out
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -516,8 +542,22 @@ func (s *apiServer) handleNodeEdgeCounts(w http.ResponseWriter, r *http.Request)
 // An id that doesn't resolve (deleted, made up) is silently skipped, not a hard failure of the
 // whole batch - matches this file's own existing permissive-on-bad-input convention (e.g.
 // handleNodeDegrees).
+//
+// ?maxprop=N (kata cycle 58) caps every string prop value at N characters. Measured need, not a
+// hypothetical: a real map view resolving 2,601 real nodes pulled 3.88 MB, almost entirely
+// `description` free text on JobListing nodes (up to 14.9 KB EACH) that the map never draws - it
+// draws one short label per node. The same nodes at display size are 198 KB, twenty times
+// smaller. Deliberately generic - this caps by LENGTH and keeps every prop KEY, so the server
+// never learns what a JobListing is and the frontend's own display-label priority keeps working
+// untouched. Omitted means full props, unchanged, which the Explorer's detail view genuinely needs.
 func (s *apiServer) handleNodesBatch(w http.ResponseWriter, r *http.Request) {
 	idsParam := strings.TrimSpace(r.URL.Query().Get("ids"))
+	maxProp := 0
+	if m := r.URL.Query().Get("maxprop"); m != "" {
+		if v, err := strconv.Atoi(m); err == nil && v > 0 {
+			maxProp = v
+		}
+	}
 	nodes := []vizNode{}
 	if idsParam == "" {
 		writeJSON(w, http.StatusOK, map[string]any{"nodes": nodes})
@@ -536,7 +576,11 @@ func (s *apiServer) handleNodesBatch(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			continue
 		}
-		nodes = append(nodes, toVizNode(n))
+		v := toVizNode(n)
+		if maxProp > 0 {
+			v.Props = truncateProps(v.Props, maxProp)
+		}
+		nodes = append(nodes, v)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"nodes": nodes})
 }
