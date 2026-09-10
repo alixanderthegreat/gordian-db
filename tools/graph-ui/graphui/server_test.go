@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	gordian "github.com/alixanderthegreat/gordian-db"
 )
@@ -657,6 +658,73 @@ func TestNodesBatch_SkipsNonexistentIdsWithoutFailing(t *testing.T) {
 	nodes := body["nodes"].([]any)
 	if len(nodes) != 1 {
 		t.Fatalf("nodes = %+v, want exactly 1 (the nonexistent id skipped, not errored)", nodes)
+	}
+}
+
+// TestNodesBatch_MaxPropCapsLongValuesKeepsKeys proves kata cycle 58's own real payload fix: a
+// long string prop is capped, a short one is untouched, and EVERY key survives - the last part
+// matters most, since the frontend's own display-label priority (name -> title -> label -> text)
+// walks those keys and would silently break if the cap dropped any.
+func TestNodesBatch_MaxPropCapsLongValuesKeepsKeys(t *testing.T) {
+	s := newTestServer(t)
+	long := strings.Repeat("x", 5000)
+	id, _ := s.g.AddNode("JobListing", map[string]any{
+		"title":       "Short Title",
+		"description": long,
+		"directApply": true,
+	})
+	mux := NewMux(s.g, nil)
+
+	w, body := doJSON(t, mux, "GET", "/api/nodes/batch?ids="+strconv.FormatInt(id, 10)+"&maxprop=120", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	props := body["nodes"].([]any)[0].(map[string]any)["props"].(map[string]any)
+
+	if len(props) != 3 {
+		t.Fatalf("props = %+v, want all 3 real keys preserved", props)
+	}
+	desc := props["description"].(string)
+	if len([]rune(desc)) != 121 { // 120 capped runes + the ellipsis marker
+		t.Fatalf("description len = %d runes, want 120 capped + 1 ellipsis", len([]rune(desc)))
+	}
+	if props["title"].(string) != "Short Title" {
+		t.Fatalf("title = %q, want the short value untouched", props["title"])
+	}
+	if props["directApply"] != true {
+		t.Fatalf("directApply = %v, want the non-string value passed through untouched", props["directApply"])
+	}
+}
+
+// TestNodesBatch_NoMaxPropReturnsFullProps proves the cap is strictly opt-in - the Explorer's own
+// detail view genuinely needs full text, so omitting maxprop must behave exactly as before.
+func TestNodesBatch_NoMaxPropReturnsFullProps(t *testing.T) {
+	s := newTestServer(t)
+	long := strings.Repeat("y", 5000)
+	id, _ := s.g.AddNode("JobListing", map[string]any{"description": long})
+	mux := NewMux(s.g, nil)
+
+	w, body := doJSON(t, mux, "GET", "/api/nodes/batch?ids="+strconv.FormatInt(id, 10), "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	props := body["nodes"].([]any)[0].(map[string]any)["props"].(map[string]any)
+	if props["description"].(string) != long {
+		t.Fatalf("description was altered without maxprop - got %d chars, want the full %d", len(props["description"].(string)), len(long))
+	}
+}
+
+// TestTruncateProps_DoesNotSplitMultibyteRunes proves the cap is rune-based, not byte-based - this
+// corpus contains real non-ASCII text, and a byte-based cut would emit invalid UTF-8.
+func TestTruncateProps_DoesNotSplitMultibyteRunes(t *testing.T) {
+	in := map[string]any{"text": strings.Repeat("é", 50)}
+	out := truncateProps(in, 10)
+	got := out["text"].(string)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated value is not valid UTF-8: %q", got)
+	}
+	if len([]rune(got)) != 11 {
+		t.Fatalf("got %d runes, want 10 + ellipsis", len([]rune(got)))
 	}
 }
 
