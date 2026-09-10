@@ -9,6 +9,26 @@ import { nodeDisplayLabel } from '../lib/label'
 // Defaults to 'concentric' so every pre-existing caller is unchanged.
 export type LayoutMode = 'concentric' | 'force'
 
+// FORCE_MAX_NODES is where 'force' stops using cose and falls back to a degree-ranked concentric
+// layout. It is a MEASURED line, not a guess (kata cycle 58, cose headless on the real jobs graph):
+//
+//   n=  122  numIter 1000 =   0.3s
+//   n=  313  numIter 1000 =   1.4s   numIter 250 =  0.5s
+//   n= 1421  numIter  100 =   6.0s   numIter 250 = 15.0s   numIter 1000 = 40.4s
+//   n= 2601  numIter  100 =  23.9s   numIter 250 = 59.3s
+//
+// cose is O(n^2)-ish per iteration, so above ~500 nodes NO iteration count rescues it - at 2,601
+// nodes even numIter=100 blocks the main thread for 24 seconds, and the real browser run at
+// numIter=1000 froze the renderer past 180 seconds without ever painting. Cutting iterations is not
+// a fix at that size; changing algorithm is. Measured at the same 2,601 nodes: grid 53ms, circle
+// 41ms, concentric 44ms, breadthfirst 398ms. Concentric ranked by DEGREE is the informative one -
+// it puts the real hubs (the keywords and employers everything attaches to) in the middle.
+export const FORCE_MAX_NODES = 500
+
+// FORCE_FULL_ITER_NODES is the second measured line: below it cose gets its full quality budget,
+// between it and FORCE_MAX_NODES iterations are cut to keep the block under about a second.
+const FORCE_FULL_ITER_NODES = 350
+
 interface Props {
   nodes: GraphVizNode[]
   edges: GraphVizEdge[]
@@ -125,8 +145,26 @@ export default function GraphViewer({ nodes, edges, centerId, layout = 'concentr
     // Real layout selection (kata cycle 57). 'force' is for a whole-graph map, which has no
     // center to ring around - animation is off there deliberately, since animating a real
     // multi-thousand-node force simulation is where a map view actually becomes unusable.
+    //
+    // Size-aware as of kata cycle 58: cose is kept only where it was measured to finish, and above
+    // FORCE_MAX_NODES the map degrades to a degree-ranked concentric layout that renders in ~44ms
+    // instead of blocking the tab. Degrading visibly beats freezing silently.
+    // Counted off `elements` rather than the prop so this stays self-contained inside the effect.
+    const forceCount = elements.filter((e) => !(e.data as any).source).length
     const layoutOptions =
-      layout === 'force'
+      layout === 'force' && forceCount > FORCE_MAX_NODES
+        ? ({
+            name: 'concentric',
+            // Real hubs to the middle: cytoscape places the LARGEST concentric value at the center,
+            // and degree is the only ranking available to a view that knows nothing about the
+            // domain. On the jobs graph this surfaces the keywords and employers that everything
+            // attaches to, which is the question a whole-graph map is being asked.
+            concentric: (node: cytoscape.NodeSingular) => node.degree(false),
+            levelWidth: () => 4,
+            minNodeSpacing: 12,
+            animate: false,
+          } as any)
+        : layout === 'force'
         ? ({
             name: 'cose',
             animate: false,
@@ -134,7 +172,7 @@ export default function GraphViewer({ nodes, edges, centerId, layout = 'concentr
             idealEdgeLength: 60,
             nestingFactor: 0.1,
             gravity: 0.25,
-            numIter: 1000,
+            numIter: forceCount > FORCE_FULL_ITER_NODES ? 250 : 1000,
           } as any)
         : ({
             name: 'concentric',

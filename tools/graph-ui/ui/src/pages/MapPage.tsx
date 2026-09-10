@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
-import GraphViewer from '../components/GraphViewer'
+import GraphViewer, { FORCE_MAX_NODES } from '../components/GraphViewer'
 import type { GraphVizNode, GraphVizEdge } from '../types'
 
 // MAP_NODE_BUDGET is a real, named ceiling on how many nodes the map will try to lay out at once.
@@ -201,6 +201,13 @@ export default function MapPage() {
         <p className="text-xs text-slate-600">
           {nodes.length.toLocaleString()} nodes · {edges.length.toLocaleString()} edges · click any
           node to open it in the Explorer
+          {nodes.length > FORCE_MAX_NODES && (
+            // Say it out loud rather than silently swapping algorithms: past the measured cose
+            // ceiling the map ranks by degree instead of simulating forces, so hubs sit in the
+            // middle. A view that quietly changes what it is showing is worse than a slow one.
+            <> · over {FORCE_MAX_NODES.toLocaleString()} nodes, laid out by degree (hubs centered)
+            rather than force-simulated</>
+          )}
         </p>
       )}
     </div>
