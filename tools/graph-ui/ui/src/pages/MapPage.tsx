@@ -10,6 +10,13 @@ import type { GraphVizNode, GraphVizEdge } from '../types'
 // line sits between them, and going over it means saying so rather than hanging the browser.
 const MAP_NODE_BUDGET = 6000
 
+// MAP_PROP_CHARS is how much of any one string prop the map asks the server for. A map node renders
+// a single short display label and nothing else, so anything past this is downloaded and thrown
+// away. Measured on the real jobs graph: HAS_KEYWORD's 2,601 nodes cost 3.88 MB at full props,
+// because one real JobListing carries up to 14.9 KB of `description` free text - and 198 KB capped.
+// 120 is comfortably longer than any label the viewer can actually draw.
+const MAP_PROP_CHARS = 120
+
 // MapPage is kata cycle 57's own real generalization of the Book Map. The control is an EDGE
 // label, not a node label, because an edge label already determines its own endpoints - which is
 // the only thing that works for a genuinely heterogeneous graph (JobListing -POSTED_BY-> Employer
@@ -87,7 +94,7 @@ export default function MapPage() {
       const resolved: GraphVizNode[] = []
       const CHUNK = 500
       for (let i = 0; i < ids.length; i += CHUNK) {
-        const res = await api.getNodesBatch(ids.slice(i, i + CHUNK))
+        const res = await api.getNodesBatch(ids.slice(i, i + CHUNK), MAP_PROP_CHARS)
         resolved.push(...res.nodes)
       }
 

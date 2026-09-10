@@ -57,8 +57,13 @@ export const api = {
   getNodeEdgeCounts: (id: number) =>
     fetchJSON<{ counts: Record<string, number> }>(`/nodes/${id}/edge-counts`),
 
-  getNodesBatch: (ids: number[]) =>
-    fetchJSON<{ nodes: GraphVizNode[] }>(`/nodes/batch?ids=${ids.join(',')}`),
+  // maxProp caps every string prop server-side. A map only ever renders a short display label, so
+  // shipping a JobListing's full 14.9 KB `description` across the wire is pure waste - but the
+  // Explorer's detail view genuinely needs the full text, so the cap is opt-in per caller.
+  getNodesBatch: (ids: number[], maxProp?: number) =>
+    fetchJSON<{ nodes: GraphVizNode[] }>(
+      `/nodes/batch?ids=${ids.join(',')}${maxProp ? `&maxprop=${maxProp}` : ''}`,
+    ),
 
   // kata cycle 57's own two GLOBAL edge primitives, for the whole-graph map. getEdgeCounts is the
   // "price the work before doing it" call the map makes first; getEdgesByLabel reports truncation
